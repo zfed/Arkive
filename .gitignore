@@ -1,0 +1,30 @@
+# Ambienti virtuali
+venv/
+.venv/
+env/
+
+# Cache e file compilati Python
+__pycache__/
+*.pyc
+*.pyo
+
+# File di configurazione locale / segreti
+.env
+*.local
+
+# Dati e output (adatta in base alle esigenze)
+data/
+output/
+*.csv
+*.zip
+
+# File di sistema e editor
+.DS_Store
+.vscode/
+.idea/
+
+# Tool: dataverse-archivematica
+tools/dataverse-archivematica/dois.txt
+tools/dataverse-archivematica/stato_archivematica.json
+tools/dataverse-archivematica/riepilogo_download.json
+tools/dataverse-archivematica/DATASET_TRASFERITI/
