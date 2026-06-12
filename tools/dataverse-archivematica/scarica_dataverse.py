@@ -2,6 +2,11 @@
 """
 scarica_dataverse.py
 --------------------
+Autore: Federica Zanardini
+Università degli Studi di Milano - Direzione ICT
+Data: 2026-06
+Sviluppato con il supporto di Claude AI (Anthropic)
+
 Scarica TUTTE LE VERSIONI di ogni dataset (+ metadati JSON) da dataverse.unimi.it
 sulla base dei DOI contenuti in dois.txt.
 

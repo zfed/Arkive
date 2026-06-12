@@ -2,6 +2,11 @@
 """
 archivematica_ingest.py
 -----------------------
+Autore: Federica Zanardini
+Università degli Studi di Milano - Direzione ICT
+Data: 2026-06
+Sviluppato con il supporto di Claude AI (Anthropic)
+
 Trasferisce e ingesta in Archivematica i dataset presenti nella Transfer
 Source Location, tenendo traccia dei pacchetti già processati in un file
 di stato (stato_archivematica.json) per non ripetere operazioni già
