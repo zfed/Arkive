@@ -9,6 +9,7 @@ Ogni tool ha una propria sottocartella in `tools/`, con codice, dipendenze e doc
 ```
 Arkive/
 ├── README.md
+├── LICENSE
 ├── .gitignore
 └── tools/
     └── dataverse-archivematica/
@@ -32,3 +33,10 @@ Entra nella cartella del tool che ti interessa e segui le istruzioni nel suo REA
 ```bash
 cd tools/nome-tool
 ```
+
+## Autore e licenza
+
+Autore: Federica Zanardini — Università degli Studi di Milano, Direzione ICT
+Sviluppato con il supporto di Claude AI (Anthropic)
+
+Distribuito con licenza [MIT](LICENSE).

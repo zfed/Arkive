@@ -1,41 +1,42 @@
-# Dataverse → Archivematica
+# Arkive
 
-Pipeline di due script Python che automatizzano il trasferimento di dataset da Dataverse UNIMI (`dataverse.unimi.it`) ad Archivematica per la conservazione a lungo termine.
+Raccolta di tool e script sviluppati per operazioni specifiche (importazione dati, automazioni, conversioni, ecc.).
 
-| Script | Funzione |
-|---|---|
-| `scarica_dataverse.py` | Scarica dataset e metadati da Dataverse e li organizza in pacchetti compatibili con Archivematica |
-| `archivematica_ingest.py` | Trasferisce ed esegue l'ingest dei pacchetti in Archivematica, tenendo traccia di ciò che è già stato processato |
+## Struttura del repository
 
-📖 **Manuale completo**: [docs/manuale_dataverse_archivematica.md](docs/manuale_dataverse_archivematica.md)
+Ogni tool ha una propria sottocartella in `tools/`, con codice, dipendenze e documentazione indipendenti.
 
-## Installazione
-
-```bash
-pip install -r requirements.txt --break-system-packages
+```
+Arkive/
+├── README.md
+├── LICENSE
+├── .gitignore
+└── tools/
+    └── dataverse-archivematica/
+        ├── README.md
+        ├── requirements.txt
+        ├── dois.txt.example
+        ├── scarica_dataverse.py
+        ├── archivematica_ingest.py
+        └── docs/
+            └── manuale_dataverse_archivematica.md
 ```
 
-## Avvio rapido
+## Tool disponibili
+
+- [`dataverse-archivematica`](tools/dataverse-archivematica/README.md): pipeline per il trasferimento di dataset da Dataverse UNIMI ad Archivematica per la conservazione a lungo termine.
+
+## Come usare un tool
+
+Entra nella cartella del tool che ti interessa e segui le istruzioni nel suo README:
 
 ```bash
-# 1. Configurazione ambiente (una tantum, in ~/.bashrc o simile)
-export DATAVERSE_API_KEY="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-export AM_API_KEY="yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
-export SS_API_KEY="zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
-export AM_TRANSFER_SOURCE_UUID="5740049b-8b06-425b-bea6-126c799b6113"
-TRANSFER_SOURCE="/mnt/e/DROPBOX/Dropbox/_ARKIVE/TRANSFER_SOURCE"
-
-# 2. Preparare l'elenco dei DOI da archiviare (vedi dois.txt.example)
-cp dois.txt.example dois.txt
-
-# 3. Scaricare i dataset direttamente nella Transfer Source
-python scarica_dataverse.py --dois dois.txt --output "$TRANSFER_SOURCE"
-
-# 4. Trasferire e ingestare in Archivematica
-python archivematica_ingest.py --processing-config dataverse_001
-
-# 5. (Facoltativo) Verificare lo stato
-cat stato_archivematica.json | python3 -m json.tool
+cd tools/nome-tool
 ```
 
-> Nota: i due script devono girare sullo stesso host del server Archivematica (o avere accesso al medesimo filesystem). Per tutti i dettagli su prerequisiti, opzioni, struttura dei pacchetti, file di stato e risoluzione dei problemi, consulta il [manuale completo](docs/manuale_dataverse_archivematica.md).
+## Autore e licenza
+
+Autore: Federica Zanardini — Università degli Studi di Milano, Direzione ICT
+Sviluppato con il supporto di Claude AI (Anthropic)
+
+Distribuito con licenza [MIT](LICENSE).
