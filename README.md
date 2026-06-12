@@ -1,6 +1,6 @@
 # Arkive
 
-Raccolta di tool e script sviluppati per operazioni specifiche (importazione dati, automazioni, conversioni, ecc.).
+Raccolta di tool e script sviluppati per operazioni specifiche in Archivematica (importazione dati, automazioni, conversioni, ecc.).
 
 ## Struttura del repository
 
