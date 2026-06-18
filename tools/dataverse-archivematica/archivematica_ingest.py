@@ -2,11 +2,6 @@
 """
 archivematica_ingest.py
 -----------------------
-Autore: Federica Zanardini
-Università degli Studi di Milano - Direzione ICT
-Data: 2026-06
-Sviluppato con il supporto di Claude AI (Anthropic)
-
 Trasferisce e ingesta in Archivematica i dataset presenti nella Transfer
 Source Location, tenendo traccia dei pacchetti già processati in un file
 di stato (stato_archivematica.json) per non ripetere operazioni già
@@ -82,6 +77,28 @@ from pathlib import Path
 
 import requests
 
+def _load_dotenv(env_file: str = ".env") -> None:
+    """
+    Carica variabili da un file .env senza dipendenze esterne.
+    Formato supportato: KEY=value, ignora righe vuote e commenti (#).
+    Le variabili già presenti nell'ambiente non vengono sovrascritte.
+    """
+    p = Path(env_file)
+    if not p.exists():
+        return
+    with open(p, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key   = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+_load_dotenv()
+
 # ── Configurazione ────────────────────────────────────────────────────────────
 
 STATE_FILE           = "stato_archivematica.json"
@@ -97,6 +114,12 @@ SS_API_KEY           = ""                       # sovrascrivibile da CLI / env
 TRANSFER_SOURCE_UUID = ""    # UUID Location di tipo Transfer Source nello SS
 TRANSFER_TYPE        = "standard"
 PROCESSING_CONFIG    = "dataverse_001"  # nome della processing configuration in Archivematica
+
+# Verifica certificato SSL (False per certificati self-signed)
+SSL_VERIFY           = True
+
+# Valore attivo — impostato da main() dopo aver risolto le opzioni CLI
+_ssl_verify: bool = True
 
 # Tipi di transfer accettati dall'API Archivematica
 VALID_TRANSFER_TYPES = [
@@ -153,7 +176,8 @@ def ss_headers(api_key: str, user: str) -> dict:
 
 
 def get_json(url: str, headers: dict) -> dict:
-    r = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+    r = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT,
+                     verify=_ssl_verify)
     if not r.ok:
         try:
             body = r.json()
@@ -184,14 +208,18 @@ def list_processing_configs() -> list[str]:
     I file sono nominati "<nome>ProcessingMCP.xml" (es. "dataverse_001ProcessingMCP.xml",
     "automatedProcessingMCP.xml", "defaultProcessingMCP.xml").
     Restituisce i nomi senza il suffisso, es. ["default", "automated", "dataverse_001"].
+    Restituisce None se la cartella non è accessibile (permessi insufficienti).
     """
     p = Path(PROCESSING_CONFIGS_DIR)
-    if not p.exists():
-        return []
-    names = []
-    for f in p.glob("*ProcessingMCP.xml"):
-        names.append(f.name[:-len("ProcessingMCP.xml")])
-    return sorted(names)
+    try:
+        if not p.exists():
+            return []
+        names = []
+        for f in p.glob("*ProcessingMCP.xml"):
+            names.append(f.name[:-len("ProcessingMCP.xml")])
+        return sorted(names)
+    except PermissionError:
+        return None
 
 
 def apply_processing_config(doi_path: Path, processing_config: str) -> bool:
@@ -207,7 +235,20 @@ def apply_processing_config(doi_path: Path, processing_config: str) -> bool:
     non è stata trovata (in tal caso si procede con il default di Archivematica).
     """
     src_xml = Path(PROCESSING_CONFIGS_DIR) / f"{processing_config}ProcessingMCP.xml"
-    if not src_xml.exists():
+    try:
+        exists = src_xml.exists()
+    except PermissionError:
+        cmd = (f"sudo cp {PROCESSING_CONFIGS_DIR}/"
+               f"{processing_config}ProcessingMCP.xml "
+               f"{doi_path}/processingMCP.xml")
+        print(
+            f"    [AVVISO] Impossibile accedere a {PROCESSING_CONFIGS_DIR} "
+            f"(Permission denied). processingMCP.xml non verra copiato. "
+            f"Per applicare la config manualmente:\n      {cmd}"
+        )
+        return False
+
+    if not exists:
         print(
             f"    [AVVISO] Processing config '{src_xml.name}' non trovata "
             f"in {PROCESSING_CONFIGS_DIR}. Verrà usata la configurazione di default "
@@ -215,10 +256,17 @@ def apply_processing_config(doi_path: Path, processing_config: str) -> bool:
         )
         return False
 
-    dst_xml = doi_path / "processingMCP.xml"
-    shutil.copyfile(src_xml, dst_xml)
-    print(f"    [debug] processingMCP.xml ('{processing_config}') copiato in {dst_xml}")
-    return True
+    try:
+        dst_xml = doi_path / "processingMCP.xml"
+        shutil.copyfile(src_xml, dst_xml)
+        print(f"    [debug] processingMCP.xml ('{processing_config}') copiato in {dst_xml}")
+        return True
+    except PermissionError:
+        print(
+            f"    [AVVISO] Impossibile leggere {src_xml} (Permission denied). "
+            f"processingMCP.xml non verrà copiato."
+        )
+        return False
 
 
 def processing_config_exists(am_url: str, am_user: str, am_key: str,
@@ -231,7 +279,7 @@ def processing_config_exists(am_url: str, am_user: str, am_key: str,
     url = f"{am_url}/api/processing-configuration/{name}"
     try:
         r = requests.get(url, headers=am_headers(am_key, am_user),
-                         timeout=REQUEST_TIMEOUT)
+                         timeout=REQUEST_TIMEOUT, verify=_ssl_verify)
         if r.status_code == 200:
             return True
         if r.status_code == 404:
@@ -309,7 +357,8 @@ def start_transfer(
         "row_ids[]": "",
     }
     h = am_headers(am_key, am_user)
-    r = requests.post(url, headers=h, data=payload, timeout=REQUEST_TIMEOUT)
+    r = requests.post(url, headers=h, data=payload, timeout=REQUEST_TIMEOUT,
+                      verify=_ssl_verify)
 
     if not r.ok:
         try:
@@ -672,6 +721,11 @@ def main():
              f"per vedere quelli disponibili.")
 
     # Utility
+    parser.add_argument("--no-verify-ssl",   action="store_true",
+        help=(
+            "Disabilita la verifica del certificato SSL (utile con certificati "
+            "self-signed). Equivalente a impostare SSL_VERIFY=false nel .env"
+        ))
     parser.add_argument("--list-sources",  action="store_true",
         help="Elenca le Transfer Source Locations disponibili ed esce")
     parser.add_argument("--list-processing-configs", action="store_true",
@@ -684,30 +738,65 @@ def main():
 
     args = parser.parse_args()
 
+    global _ssl_verify
+
+    # Verifica SSL: disabilitata se --no-verify-ssl o SSL_VERIFY=false nel .env
+    env_ssl = os.environ.get("SSL_VERIFY", "true").lower()
+    if args.no_verify_ssl or env_ssl in ("false", "0", "no"):
+        _ssl_verify = False
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        print("[AVVISO] Verifica certificato SSL disabilitata (certificati self-signed accettati).")
+
     # Risolvi credenziali da env se non passate da CLI
+    # Risolvi tutte le variabili da .env / ambiente (CLI ha priorità)
+    if args.am_url == AM_URL:
+        args.am_url = os.environ.get("AM_URL", AM_URL)
+    if args.am_user == AM_USER:
+        args.am_user = os.environ.get("AM_USER", AM_USER)
     if not args.am_apikey:
         args.am_apikey = os.environ.get("AM_API_KEY", AM_API_KEY)
+    if args.ss_url == SS_URL:
+        args.ss_url = os.environ.get("SS_URL", SS_URL)
+    if args.ss_user == SS_USER:
+        args.ss_user = os.environ.get("SS_USER", SS_USER)
     if not args.ss_apikey:
         args.ss_apikey = os.environ.get("SS_API_KEY", SS_API_KEY)
     if not args.transfer_source:
         args.transfer_source = os.environ.get(
             "AM_TRANSFER_SOURCE_UUID", TRANSFER_SOURCE_UUID
         )
+    if args.transfer_type == TRANSFER_TYPE:
+        args.transfer_type = os.environ.get("AM_TRANSFER_TYPE", TRANSFER_TYPE)
+    if args.processing_config == PROCESSING_CONFIG:
+        args.processing_config = os.environ.get("AM_PROCESSING_CONFIG", PROCESSING_CONFIG)
 
     # ── Modalità --list-processing-configs ────────────────────────────────────
     if args.list_processing_configs:
         configs = list_processing_configs()
-        if configs:
+        if configs is None:
+            print(
+                f"[ERRORE] Permission denied su {PROCESSING_CONFIGS_DIR}\n"
+                f"L'utente corrente non ha i permessi per leggere la cartella.\n"
+                f"Soluzioni possibili:\n"
+                f"  1. Aggiungere l'utente al gruppo 'archivematica':\n"
+                f"       sudo usermod -aG archivematica $USER\n"
+                f"       (richiede logout/login per avere effetto)\n"
+                f"  2. Eseguire lo script come utente archivematica:\n"
+                f"       sudo -u archivematica python3 archivematica_ingest.py ...\n"
+                f"  3. Specificare --processing-config <nome> direttamente,\n"
+                f"     senza usare --list-processing-configs.\n"
+                f"\nConfigurazioni tipicamente disponibili: default, automated, dataverse_001"
+            )
+        elif configs:
             print("Processing configuration disponibili:\n")
             for c in configs:
                 marker = "  (default)" if c == PROCESSING_CONFIG else ""
                 print(f"  {c}{marker}")
         else:
             print(
-                f"[ATTENZIONE] Impossibile leggere {PROCESSING_CONFIGS_DIR}\n"
-                f"Verifica che lo script sia eseguito sullo stesso host di "
-                f"Archivematica e di avere i permessi di lettura.\n\n"
-                f"Configurazioni note di default: default, automated, dataverse_001"
+                f"[ATTENZIONE] Nessuna processing configuration trovata in "
+                f"{PROCESSING_CONFIGS_DIR}."
             )
         sys.exit(0)
 
@@ -799,6 +888,7 @@ def main():
     print(f"  Transfer type : {args.transfer_type}")
     print(f"  Processing cfg: {args.processing_config}")
     print(f"  File di stato : {args.state_file}")
+    print(f"  SSL verify    : {_ssl_verify}")
     if args.dry_run:
         print(f"  MODALITÀ      : DRY-RUN (nessuna operazione verrà eseguita)")
     print(f"{'='*64}\n")
@@ -850,3 +940,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

@@ -2,7 +2,7 @@
 
 Questo manuale documenta l'uso di due script Python che, insieme, automatizzano il
 trasferimento di dataset da **Dataverse UNIMI** (`dataverse.unimi.it`) ad
-**Archivematica** per la conservazione a lungo termine:
+**Archivematica** per la conservazione a lungo termine.
 
 | Script | Funzione |
 |---|---|
@@ -15,12 +15,13 @@ trasferimento di dataset da **Dataverse UNIMI** (`dataverse.unimi.it`) ad
 
 1. [Panoramica del flusso](#1-panoramica-del-flusso)
 2. [Prerequisiti](#2-prerequisiti)
-3. [Script 1 — scarica_dataverse.py](#3-script-1--scarica_dataversepy)
-4. [Script 2 — archivematica_ingest.py](#4-script-2--archivematica_ingestpy)
-5. [Struttura del pacchetto generato](#5-struttura-del-pacchetto-generato)
-6. [File di stato e ripresa dopo interruzioni](#6-file-di-stato-e-ripresa-dopo-interruzioni)
-7. [Risoluzione dei problemi comuni](#7-risoluzione-dei-problemi-comuni)
-8. [Esempio di esecuzione completa](#8-esempio-di-esecuzione-completa)
+3. [Configurazione — file .env](#3-configurazione--file-env)
+4. [Script 1 — scarica_dataverse.py](#4-script-1--scarica_dataversepy)
+5. [Script 2 — archivematica_ingest.py](#5-script-2--archivematica_ingestpy)
+6. [Struttura del pacchetto generato](#6-struttura-del-pacchetto-generato)
+7. [File di stato e ripresa dopo interruzioni](#7-file-di-stato-e-ripresa-dopo-interruzioni)
+8. [Risoluzione dei problemi comuni](#8-risoluzione-dei-problemi-comuni)
+9. [Esempio di esecuzione completa](#9-esempio-di-esecuzione-completa)
 
 ---
 
@@ -41,15 +42,14 @@ trasferimento di dataset da **Dataverse UNIMI** (`dataverse.unimi.it`) ad
 
 Il flusso tipico è:
 
-1. Si prepara un file `dois.txt` con l'elenco dei DOI dei dataset da archiviare.
+1. Si prepara `dois.txt` con l'elenco dei DOI da archiviare.
 2. Si esegue `scarica_dataverse.py`, che scarica tutte le versioni di ciascun
-   dataset e le organizza in pacchetti pronti per Archivematica, **direttamente
-   nella Transfer Source Location**.
-3. Si esegue `archivematica_ingest.py`, che avvia il transfer e l'ingest in
-   Archivematica per ogni pacchetto non ancora processato.
-4. Lo stato di ogni pacchetto (UUID di transfer, SIP, AIP) viene salvato in un
-   file JSON, così le esecuzioni successive elaborano solo i dataset nuovi o
-   non completati.
+   dataset direttamente nella **Transfer Source Location** di Archivematica.
+3. Si esegue `archivematica_ingest.py`, che avvia il transfer e l'ingest per
+   ogni pacchetto non ancora processato.
+4. Lo stato di ogni pacchetto (UUID di transfer, SIP, AIP) viene salvato in
+   `stato_archivematica.json`, così le esecuzioni successive elaborano solo i
+   dataset nuovi o non completati.
 
 ---
 
@@ -61,7 +61,7 @@ Il flusso tipico è:
 pip install requests --break-system-packages
 ```
 
-### Accesso a dataverse.unimi.it
+### Accesso a Dataverse
 
 - Una **API key Dataverse** (necessaria solo per dataset ad accesso ristretto;
   per dataset pubblici può essere lasciata vuota).
@@ -70,69 +70,136 @@ pip install requests --break-system-packages
 
 - **Dashboard API key** dell'utente Archivematica (es. `zfed`)
 - **Storage Service API key** dell'utente Storage Service (es. `archivematica`)
-- **UUID della Transfer Source Location** — la cartella che Archivematica
-  monitora per i transfer
-- I due script devono girare **sullo stesso host** del server Archivematica
-  (o avere accesso al medesimo filesystem), perché:
-  - leggono/scrivono direttamente nella Transfer Source Location
-  - leggono i file XML delle processing configuration da
-    `/var/archivematica/sharedDirectory/sharedMicroServiceTasksConfigs/processingMCPConfigs/`
+- **UUID della Transfer Source Location** (vedi sotto come recuperarlo)
+- Gli script devono avere accesso in lettura/scrittura alla Transfer Source
+  Location sul filesystem
 
-### Trovare l'UUID della Transfer Source Location
+### Permessi filesystem
+
+L'utente che esegue gli script deve poter:
+
+- **leggere e scrivere** nella Transfer Source Location
+- **leggere** la cartella delle processing configuration:
+  `/var/archivematica/sharedDirectory/sharedMicroServiceTasksConfigs/processingMCPConfigs/`
+
+Se necessario, aggiungere l'utente al gruppo `archivematica`:
+```bash
+sudo usermod -aG archivematica <utente>
+# Richiede logout/login per avere effetto
+```
+
+### Note su SSL
+
+Archivematica è tipicamente raggiungibile via HTTPS anche in installazioni
+locali. Se usa un certificato self-signed, impostare `SSL_VERIFY=false` nel
+`.env` (o usare `--no-verify-ssl` da riga di comando).
+
+L'URL corretto per le API è solitamente:
+- Dashboard: `https://<host>` (porta 443)
+- Storage Service: `https://<host>:8000` (porta 8000 con redirect HTTP→HTTPS)
+
+---
+
+## 3. Configurazione — file .env
+
+Tutti i parametri di configurazione possono essere impostati in un file `.env`
+nella stessa cartella degli script. Gli script caricano automaticamente il
+`.env` all'avvio senza dipendenze esterne.
+
+### Creare il file .env
 
 ```bash
-python archivematica_ingest.py --list-sources \
-  --ss-user archivematica --ss-apikey <CHIAVE_STORAGE_SERVICE>
+cp .env.template .env
+nano .env   # o qualsiasi editor di testo
 ```
 
-Output di esempio:
-```
-Transfer Source Locations disponibili:
-
-  UUID : 5740049b-8b06-425b-bea6-126c799b6113
-  Path : /mnt/e/DROPBOX/Dropbox/_ARKIVE/TRANSFER_SOURCE
-  Desc : Default transfer source
-```
-
-Annota l'UUID: servirà come `--transfer-source` per la fase di ingest.
-
-### Trovare le processing configuration disponibili
+### Contenuto del .env
 
 ```bash
-python archivematica_ingest.py --list-processing-configs
+# ── Dataverse ─────────────────────────────────────────────────
+DATAVERSE_API_KEY=<chiave_dataverse>
+
+# ── Archivematica Dashboard ───────────────────────────────────
+AM_URL=https://192.168.139.39
+AM_USER=zfed
+AM_API_KEY=<chiave_dashboard>
+
+# ── Archivematica Storage Service ─────────────────────────────
+SS_URL=https://192.168.139.39:8000
+SS_USER=archivematica
+SS_API_KEY=<chiave_storage_service>
+
+# ── Transfer ──────────────────────────────────────────────────
+AM_TRANSFER_SOURCE_UUID=<uuid_transfer_source>
+AM_TRANSFER_TYPE=standard
+AM_PROCESSING_CONFIG=dataverse_001
+
+# ── SSL ───────────────────────────────────────────────────────
+SSL_VERIFY=false
 ```
 
-Output di esempio:
-```
-Processing configuration disponibili:
+### Recuperare i valori mancanti
 
-  automated
-  dataverse_001  (default)
-  default
+**UUID della Transfer Source Location:**
+```bash
+python3 archivematica_ingest.py --no-verify-ssl --list-sources
+```
+
+**Processing configuration disponibili:**
+```bash
+python3 archivematica_ingest.py --no-verify-ssl --list-processing-configs
+```
+
+### Errori comuni nel .env
+
+| Errore | Sintomo | Correzione |
+|---|---|---|
+| `SS_URL=https//...` (mancano i `:`) | `MissingSchema` | `SS_URL=https://...` |
+| `SS_URL=http://...` invece di `https://` | `302 Found` / connessione rifiutata | `SS_URL=https://...` |
+| Chiavi API vuote | `401 Unauthorized` | Compilare `AM_API_KEY` e `SS_API_KEY` |
+| UUID errato | `404 Not Found` | Usare `--list-sources` per trovare l'UUID corretto |
+| Variabili precedentemente esportate con `export` | Valori vecchi ignorati | `unset SS_URL AM_URL ...` prima di rieseguire |
+
+### Priorità delle variabili
+
+Le variabili vengono risolte in questo ordine (la prima disponibile vince):
+
+1. Argomento da riga di comando (es. `--ss-apikey`)
+2. Variabile d'ambiente di sistema (impostata con `export`)
+3. File `.env` nella directory corrente
+4. Valore di default nel codice
+
+> **Attenzione:** se in una sessione precedente hai eseguito
+> `export $(grep -v '^#' .env | xargs)`, le variabili rimangono attive
+> nella sessione corrente e hanno priorità sul `.env`. In caso di problemi,
+> aprire una nuova sessione shell o eseguire `unset` sulle variabili
+> interessate.
+
+### Sicurezza
+
+Il file `.env` contiene credenziali — non committarlo mai su git:
+```bash
+echo ".env" >> .gitignore
 ```
 
 ---
 
-## 3. Script 1 — scarica_dataverse.py
+## 4. Script 1 — scarica_dataverse.py
 
 ### Cosa fa
 
 Per ogni DOI elencato in `dois.txt`:
 
-1. Recupera **tutte le versioni** pubblicate del dataset
-   (`v1.0`, `v1.1`, `v2.0`, ...) tramite l'API Dataverse
+1. Recupera **tutte le versioni** pubblicate del dataset tramite l'API Dataverse
 2. Per ciascuna versione:
    - scarica tutti i file del dataset
-   - salva i metadati nativi Dataverse e l'export `dataverse_json` in un
-     unico file `dataverse.json`
-   - genera un `metadata.csv` Dublin Core specifico per quella versione
-3. Genera un `metadata.csv` complessivo nella radice del pacchetto, con i
+   - salva i metadati Dataverse in `dataverse.json`
+   - genera un `metadata.csv` Dublin Core per quella versione
+3. Genera un `metadata.csv` complessivo nella radice del pacchetto con i
    metadati Dublin Core di **tutte le versioni**, nel formato letto
    nativamente da Archivematica (METS `dmdSec`)
 
 ### File di input: dois.txt
-
-Un DOI per riga. Le righe vuote e quelle che iniziano con `#` vengono ignorate.
 
 ```
 doi:10.13130/RD_UNIMI/KS2PUX
@@ -146,32 +213,22 @@ doi:10.13130/RD_UNIMI/QBRJNN
 | Opzione | Default | Descrizione |
 |---|---|---|
 | `--dois <file>` | `dois.txt` | File con l'elenco dei DOI |
-| `--output <cartella>` | `DATASET_TRASFERITI` | Cartella di destinazione (deve coincidere con la Transfer Source Location di Archivematica) |
-| `--apikey <chiave>` | _(vuoto)_ | API key Dataverse |
+| `--output <cartella>` | `DATASET_TRASFERITI` | Cartella di destinazione (Transfer Source Location) |
+| `--apikey <chiave>` | dal `.env` | API key Dataverse |
+| `--no-verify-ssl` | `false` | Disabilita verifica certificato SSL |
 
-### API key Dataverse
-
-Tre modi, in ordine di priorità:
-
-1. Argomento da riga di comando: `--apikey <chiave>`
-2. Variabile d'ambiente: `DATAVERSE_API_KEY=<chiave>`
-3. Costante `API_KEY` nel file (sconsigliato, solo per test locali)
-
-### Esempi di esecuzione
+### Esempi
 
 ```bash
-# Caso base: dataset pubblici, output nella cartella di default
-python scarica_dataverse.py
+# Con configurazione da .env
+python3 scarica_dataverse.py
 
-# Specificando la API key e l'output verso la Transfer Source di Archivematica
-python scarica_dataverse.py \
-  --dois dois.txt \
-  --output /mnt/e/DROPBOX/Dropbox/_ARKIVE/TRANSFER_SOURCE \
-  --apikey abcd1234efgh5678
+# Specificando l'output verso la Transfer Source di Archivematica
+python3 scarica_dataverse.py \
+  --output /mnt/e/DROPBOX/Dropbox/_ARKIVE/TRANSFER_SOURCE
 
-# Con API key da variabile d'ambiente
-export DATAVERSE_API_KEY=abcd1234efgh5678
-python scarica_dataverse.py --output /mnt/e/DROPBOX/Dropbox/_ARKIVE/TRANSFER_SOURCE
+# Con certificato self-signed
+python3 scarica_dataverse.py --no-verify-ssl
 ```
 
 ### Output a schermo
@@ -180,8 +237,9 @@ python scarica_dataverse.py --output /mnt/e/DROPBOX/Dropbox/_ARKIVE/TRANSFER_SOU
 ============================================================
   Dataverse UNIMI — Download automatico (tutte le versioni)
   Sorgente DOI : dois.txt  (3 DOI)
-  Destinazione : /mnt/e/DROPBOX/Dropbox/_ARKIVE/TRANSFER_SOURCE
+  Destinazione : /mnt/.../TRANSFER_SOURCE
   API key      : ******5678
+  SSL verify   : False
 ============================================================
 
 [1/3] DOI: doi:10.13130/RD_UNIMI/KS2PUX
@@ -191,57 +249,35 @@ python scarica_dataverse.py --output /mnt/e/DROPBOX/Dropbox/_ARKIVE/TRANSFER_SOU
     [metadata] dataverse.json salvato
     [data] 4 file trovati, inizio download...
       Scarico: works.tab ... OK (25 KB)
-      Scarico: geolocations.tab ... OK (1 KB)
-      Scarico: collections.tab ... OK (2 KB)
-      Scarico: README.txt ... OK (3 KB)
+      ...
     [metadata] metadata.csv (versione) generato (4 righe)
   [metadata] metadata.csv generato (4 righe, 1 versione/i)
   [validazione] metadata.csv OK — nessun problema rilevato.
   ✓ Stato: ok | Versioni: 1 | File OK: 4 | Errori file: 0
-
-...
-
-============================================================
-  RIEPILOGO FINALE
-  Completati  : 3
-  Parziali    : 0
-  Errori      : 0
-  Riepilogo   : DATASET_TRASFERITI/riepilogo_download.json
-============================================================
 ```
 
 ### Comportamento idempotente
 
-Lo script può essere rieseguito più volte senza ridondanze:
-
-- i file già scaricati (presenti e non vuoti) vengono **saltati**
-  (`[SKIP] Già presente: ...`)
-- `dataverse.json` e `metadata.csv` di versione vengono generati solo se
-  mancanti
-- il `metadata.csv` complessivo (nella cartella `metadata/` radice) viene
-  **sempre rigenerato**, in modo da includere automaticamente eventuali nuove
-  versioni aggiunte in esecuzioni successive
+- File già scaricati → **saltati**
+- `dataverse.json` e `metadata.csv` di versione → generati solo se mancanti
+- `metadata.csv` complessivo → **sempre rigenerato** (include nuove versioni)
 
 ---
 
-## 4. Script 2 — archivematica_ingest.py
+## 5. Script 2 — archivematica_ingest.py
 
 ### Cosa fa
 
-Per ogni pacchetto DOI presente nella Transfer Source Location (e non ancora
-completato):
+Per ogni pacchetto DOI nella Transfer Source Location (non ancora completato):
 
-1. Copia il file `processingMCP.xml` corrispondente alla **processing
-   configuration** scelta nella radice del pacchetto
-2. Avvia il **Transfer** tramite la Dashboard API di Archivematica, con nome
-   nel formato `AIP-<YYYYMMDD>-<DOI>`
+1. Copia `processingMCP.xml` nella radice del pacchetto
+2. Avvia il **Transfer** con nome `AIP-<YYYYMMDD>-<DOI>`
 3. Attende il completamento del Transfer (polling)
-4. Attende il completamento dell'**Ingest** (SIP → AIP) (polling)
-5. Salva l'UUID dell'AIP risultante nel file di stato
+4. Attende il completamento dell'**Ingest** (SIP → AIP)
+5. Salva l'UUID dell'AIP nel file di stato
 
-**Importante:** ogni cartella DOI (con tutte le sue versioni `v1.0/`, `v2.0/`,
-... al suo interno) viene trasferita come **un unico pacchetto**, non una
-versione alla volta.
+Ogni cartella DOI (con tutte le versioni al suo interno) viene trasferita
+come **un unico pacchetto**.
 
 ### Opzioni da riga di comando
 
@@ -249,68 +285,60 @@ versione alla volta.
 
 | Opzione | Default | Descrizione |
 |---|---|---|
-| `--source <cartella>` | _(risolto automaticamente)_ | Directory con i pacchetti DOI. Se omesso, viene usato il path della Transfer Source Location risolto dallo Storage Service — comportamento consigliato |
+| `--source <cartella>` | _(da Transfer Source)_ | Directory con i pacchetti. Se omesso, usa il path della Transfer Source Location |
 | `--state-file <file>` | `stato_archivematica.json` | File JSON di tracciamento |
 
 #### Dashboard Archivematica
 
 | Opzione | Default | Descrizione |
 |---|---|---|
-| `--am-url <url>` | `http://localhost` | URL del Dashboard |
-| `--am-user <utente>` | `zfed` | Utente Dashboard |
-| `--am-apikey <chiave>` | _(vuoto)_ | API key Dashboard (o variabile `AM_API_KEY`) |
+| `--am-url <url>` | dal `.env` | URL del Dashboard |
+| `--am-user <utente>` | dal `.env` | Utente Dashboard |
+| `--am-apikey <chiave>` | dal `.env` | API key Dashboard |
 
 #### Storage Service
 
 | Opzione | Default | Descrizione |
 |---|---|---|
-| `--ss-url <url>` | `http://localhost:8000` | URL Storage Service |
-| `--ss-user <utente>` | `archivematica` | Utente Storage Service |
-| `--ss-apikey <chiave>` | _(vuoto)_ | API key Storage Service (o variabile `SS_API_KEY`) |
+| `--ss-url <url>` | dal `.env` | URL Storage Service |
+| `--ss-user <utente>` | dal `.env` | Utente Storage Service |
+| `--ss-apikey <chiave>` | dal `.env` | API key Storage Service |
 
 #### Transfer
 
 | Opzione | Default | Descrizione |
 |---|---|---|
-| `--transfer-source <UUID>` | _(vuoto)_ | UUID della Transfer Source Location (o variabile `AM_TRANSFER_SOURCE_UUID`) — **obbligatorio** |
-| `--transfer-type <tipo>` | `standard` | Tipo di transfer. Valori ammessi: `standard`, `zipped bag`, `unzipped bag`, `dspace`, `dspace destination only`, `maildir`, `TRIM`, `disk image` |
-| `--processing-config <nome>` | `dataverse_001` | Nome della processing configuration (vedi `--list-processing-configs`) |
+| `--transfer-source <UUID>` | dal `.env` | UUID Transfer Source Location — **obbligatorio** |
+| `--transfer-type <tipo>` | `standard` | Tipo di transfer |
+| `--processing-config <nome>` | `dataverse_001` | Processing configuration |
 
 #### Utility
 
 | Opzione | Descrizione |
 |---|---|
-| `--list-sources` | Elenca le Transfer Source Locations disponibili ed esce |
-| `--list-processing-configs` | Elenca le processing configuration disponibili ed esce |
-| `--poll-interval <secondi>` | Intervallo tra un controllo di stato e l'altro (default: 15) |
-| `--dry-run` | Mostra cosa verrebbe fatto senza eseguire nulla |
+| `--list-sources` | Elenca le Transfer Source Locations ed esce |
+| `--list-processing-configs` | Elenca le processing configuration ed esce |
+| `--no-verify-ssl` | Disabilita verifica certificato SSL |
+| `--poll-interval <sec>` | Intervallo tra polling (default: 15s) |
+| `--dry-run` | Mostra cosa verrebbe fatto senza eseguire |
 
-### Esempi di esecuzione
+### Esempi
 
 ```bash
-# Esecuzione standard, con credenziali da riga di comando
-python archivematica_ingest.py \
-  --am-user zfed --am-apikey <CHIAVE_DASHBOARD> \
-  --ss-user archivematica --ss-apikey <CHIAVE_STORAGE_SERVICE> \
-  --transfer-source 5740049b-8b06-425b-bea6-126c799b6113
+# Esecuzione standard (tutto da .env)
+python3 archivematica_ingest.py --no-verify-ssl
 
-# Con credenziali da variabili d'ambiente (consigliato)
-export AM_API_KEY=<CHIAVE_DASHBOARD>
-export SS_API_KEY=<CHIAVE_STORAGE_SERVICE>
-export AM_TRANSFER_SOURCE_UUID=5740049b-8b06-425b-bea6-126c799b6113
-python archivematica_ingest.py
+# Lista Transfer Source disponibili
+python3 archivematica_ingest.py --no-verify-ssl --list-sources
 
-# Specificando una processing configuration diversa
-python archivematica_ingest.py --processing-config automated
-
-# Tipo di transfer "zipped bag"
-python archivematica_ingest.py --transfer-type "zipped bag"
+# Lista processing configuration disponibili
+python3 archivematica_ingest.py --no-verify-ssl --list-processing-configs
 
 # Anteprima senza eseguire nulla
-python archivematica_ingest.py --dry-run
+python3 archivematica_ingest.py --no-verify-ssl --dry-run
 
-# Polling più frequente (ogni 5 secondi)
-python archivematica_ingest.py --poll-interval 5
+# Processing configuration diversa
+python3 archivematica_ingest.py --no-verify-ssl --processing-config automated
 ```
 
 ### Output a schermo
@@ -318,62 +346,51 @@ python archivematica_ingest.py --poll-interval 5
 ```
 ================================================================
   Archivematica Ingest — trasferimento automatico dataset
-  Sorgente      : /mnt/e/DROPBOX/Dropbox/_ARKIVE/TRANSFER_SOURCE  (da Transfer Source Location 5740049b-...)
+  Sorgente      : /mnt/.../TRANSFER_SOURCE  (da Transfer Source Location ...)
   Pacchetti DOI : 3
-  Dashboard     : http://localhost  (utente: zfed, key: ******05e4)
-  Storage Svc   : http://localhost:8000  (utente: archivematica, key: ******77df)
-  Transfer Src  : 5740049b-8b06-425b-bea6-126c799b6113
+  Dashboard     : https://192.168.139.39  (utente: zfed, key: ******05e4)
+  Storage Svc   : https://192.168.139.39:8000  (utente: archivematica, key: ******77df)
+  Transfer Src  : 76ab3067-4a42-4727-a406-a5511c4bea71
   Transfer type : standard
   Processing cfg: dataverse_001
+  SSL verify    : False
   File di stato : stato_archivematica.json
 ================================================================
 
 [1/3] doi_10.13130_RD_UNIMI_KS2PUX
   → Elaborazione: doi_10.13130_RD_UNIMI_KS2PUX
-    [debug] processingMCP.xml ('dataverse_001') copiato in .../doi_10.13130_RD_UNIMI_KS2PUX/processingMCP.xml
+    [debug] processingMCP.xml ('dataverse_001') copiato in .../processingMCP.xml
     Avvio transfer 'AIP-20260611-doi_10.13130_RD_UNIMI_KS2PUX' ...
-    [debug] Transfer Source base : /mnt/e/DROPBOX/Dropbox/_ARKIVE/TRANSFER_SOURCE
-    [debug] Full path            : /mnt/e/DROPBOX/Dropbox/_ARKIVE/TRANSFER_SOURCE/doi_10.13130_RD_UNIMI_KS2PUX
-    [debug] Risposta start_transfer: {'message': 'Copy successful.', 'path': '.../AIP-20260611-doi_10.13130_RD_UNIMI_KS2PUX-<uuid>/'}
     Transfer UUID: <uuid>
     Attendo completamento transfer ...
     [transfer] stato: PROCESSING — attendo 15s ...
     SIP UUID: <uuid>
     Attendo completamento ingest ...
-    [ingest]   stato: PROCESSING — attendo 15s ...
     ✓ Ingest completato — AIP UUID: <uuid>
-
-...
 
 ================================================================
   RIEPILOGO FINALE
   Completati   : 3
   Già presenti : 0
   Errori       : 0
-  File stato   : stato_archivematica.json
 ================================================================
 ```
 
 ---
 
-## 5. Struttura del pacchetto generato
-
-`scarica_dataverse.py` genera, per ogni DOI, una struttura compatibile con
-Archivematica, pronta per essere trasferita **come unico pacchetto**:
+## 6. Struttura del pacchetto generato
 
 ```
-DATASET_TRASFERITI/                          ← Transfer Source Location
-  doi_10.13130_RD_UNIMI_KS2PUX/              ← un pacchetto = un transfer
+TRANSFER_SOURCE/
+  doi_10.13130_RD_UNIMI_KS2PUX/
     objects/
       v1.0/
-        objects/                             ← file del dataset
+        objects/                   ← file del dataset
           works.tab
-          geolocations.tab
-          collections.tab
           README.txt
-        metadata/                            ← metadati di questa versione
-          dataverse.json                     ← metadati nativi Dataverse + export (preservation)
-          metadata.csv                       ← Dublin Core di questa versione
+        metadata/                  ← metadati di questa versione
+          dataverse.json           ← metadati Dataverse (preservation)
+          metadata.csv             ← Dublin Core di questa versione
       v2.0/
         objects/
           works_v2.tab
@@ -381,75 +398,32 @@ DATASET_TRASFERITI/                          ← Transfer Source Location
           dataverse.json
           metadata.csv
     metadata/
-      metadata.csv                           ← Dublin Core di TUTTE le versioni
-                                              ← letto da Archivematica → METS dmdSec
-    processingMCP.xml                        ← copiato da archivematica_ingest.py
-                                              ← prima dell'avvio del transfer
+      metadata.csv                 ← Dublin Core di TUTTE le versioni
+                                    ← letto da Archivematica → METS dmdSec
+    processingMCP.xml              ← copiato prima del transfer
 ```
 
-### Formato di metadata.csv (radice del pacchetto)
+### Formato metadata.csv (radice del pacchetto)
 
-| filename | dc.title | dc.creator | dc.date | dc.description | dc.identifier | dc.publisher | dc.rights | dc.subject | dc.type |
-|---|---|---|---|---|---|---|---|---|---|
-| `objects/v1.0/objects/works.tab` | Titolo dataset | Autore 1 \| Autore 2 | 2026-03-04 | Descrizione... | doi:10.13130/RD_UNIMI/KS2PUX | Editore | CC-BY 4.0 | tag1 \| tag2 | Dataset |
-| `objects/v1.0/objects/README.txt` | ... | ... | ... | ... | ... | ... | ... | ... | Dataset |
-| `objects/v2.0/objects/works_v2.tab` | ... | ... | ... | ... | ... | ... | ... | ... | Dataset |
+| filename | dc.title | dc.creator | dc.date | dc.identifier | ... |
+|---|---|---|---|---|---|
+| `objects/v1.0/objects/works.tab` | Titolo | Autore | 2026-03-04 | doi:10.13130/... | ... |
+| `objects/v1.0/objects/README.txt` | Titolo | Autore | 2026-03-04 | doi:10.13130/... | ... |
+| `objects/v2.0/objects/works_v2.tab` | Titolo | Autore | 2026-03-04 | doi:10.13130/... | ... |
 
-Questi metadati vengono trasposti automaticamente da Archivematica nel
-`METS.xml` generato per l'AIP, come elementi `<dmdSec>` con `MDTYPE="DC"`.
-
-### Validazione automatica
-
-Dopo la generazione, il `metadata.csv` viene validato automaticamente:
-
-- **Errori bloccanti** (impostano lo stato del DOI a `partial`):
-  - prima colonna diversa da `filename`
-  - colonna `dc.title` mancante
-  - nomi di colonna con spazi
-  - `filename` che non inizia con `objects/`
-  - caratteri di controllo nel `filename`
-- **Avvisi** (non bloccanti):
-  - colonne non Dublin Core (`dc.*` o `dcterms.*`)
-  - `dc.title` vuoto in qualche riga
-  - righe completamente vuote
+Archivematica traspone questi metadati nel `METS.xml` come `<dmdSec MDTYPE="DC">`.
 
 ---
 
-## 6. File di stato e ripresa dopo interruzioni
+## 7. File di stato e ripresa dopo interruzioni
 
-### riepilogo_download.json (generato da scarica_dataverse.py)
-
-Riepilogo di tutte le esecuzioni, per DOI e per versione:
-
-```json
-[
-  {
-    "doi": "doi:10.13130/RD_UNIMI/KS2PUX",
-    "status": "ok",
-    "versions": [
-      {
-        "version": "v1.0",
-        "state": "RELEASED",
-        "status": "ok",
-        "files_ok": 4,
-        "files_err": 0,
-        "error": null
-      }
-    ],
-    "error": null
-  }
-]
-```
-
-### stato_archivematica.json (generato da archivematica_ingest.py)
-
-Traccia lo stato di ogni pacchetto DOI trasferito:
+### stato_archivematica.json
 
 ```json
 {
   "doi_10.13130_RD_UNIMI_KS2PUX": {
     "transfer_name": "AIP-20260611-doi_10.13130_RD_UNIMI_KS2PUX",
-    "transfer_uuid": "bde477ff-f88a-45f6-8714-861248ee194d",
+    "transfer_uuid": "bde477ff-...",
     "sip_uuid": "a1b2c3d4-...",
     "aip_uuid": "e5f6a7b8-...",
     "status": "ingested",
@@ -459,29 +433,16 @@ Traccia lo stato di ogni pacchetto DOI trasferito:
 }
 ```
 
-#### Valori possibili di `status`
+### Valori di status
 
 | Valore | Significato |
 |---|---|
-| `in_progress` | Transfer/ingest avviato ma non completato (es. script interrotto) |
-| `transferred` | Transfer completato, ingest non ancora completato |
-| `ingested` | Completato con successo — **pacchetto saltato nelle esecuzioni successive** |
-| `failed` | Errore durante transfer o ingest (vedi campo `error`) |
+| `in_progress` | Avviato ma non completato |
+| `transferred` | Transfer ok, ingest non ancora completato |
+| `ingested` | **Completato** — saltato nelle esecuzioni successive |
+| `failed` | Errore — verrà ritentato al prossimo avvio |
 
-#### Ripresa dopo un'interruzione
-
-Se lo script viene interrotto (es. Ctrl+C, crash, riavvio), al rilancio:
-
-- i pacchetti con `status: "ingested"` vengono **saltati**
-- i pacchetti con `transfer_uuid` già presente **non vengono ritrasferiti**:
-  lo script riprende il polling da dove si era interrotto
-- i pacchetti con `status: "failed"` vengono **ritentati da capo** (nuovo
-  transfer)
-
-#### Reset manuale di un pacchetto
-
-Per forzare la rielaborazione di un singolo DOI (es. dopo aver corretto un
-problema):
+### Reset manuale di un pacchetto
 
 ```bash
 python3 -c "
@@ -493,7 +454,7 @@ print('Rimosso')
 "
 ```
 
-#### Reset completo
+### Reset completo
 
 ```bash
 echo '{}' > stato_archivematica.json
@@ -501,111 +462,134 @@ echo '{}' > stato_archivematica.json
 
 ---
 
-## 7. Risoluzione dei problemi comuni
+## 8. Risoluzione dei problemi comuni
 
-### "Nessuna versione trovata" / "Nessun pacchetto DOI trovato"
+### MissingSchema / URL non valido
 
-- Verifica che `--source` (o la Transfer Source Location di default) punti
-  alla cartella che contiene le sottocartelle `doi_.../objects/vX.Y/`
-- Verifica che `scarica_dataverse.py` sia stato eseguito con `--output`
-  puntato alla stessa cartella
-
-### Errore HTTP 500 su `start_transfer`
-
-Tipicamente causato da un path errato. Lo script stampa righe di debug:
 ```
-[debug] Transfer Source base : ...
-[debug] Full path            : ...
+MissingSchema: Invalid URL 'https//...'
 ```
-Verifica che `Full path` corrisponda a un percorso realmente esistente sul
-filesystem del server Archivematica.
+Mancano i due punti nell'URL. Correggere nel `.env`: `https://` non `https//`.
 
-### Il transfer non appare nel Dashboard
+### 302 Found / Connection Refused sulla porta 8000
 
-- Controlla che la cartella sia stata effettivamente copiata in:
-  ```
-  /var/archivematica/sharedDirectory/watchedDirectories/activeTransfers/standardTransfer/
-  ```
-- Verifica che i servizi Archivematica siano attivi:
-  ```bash
-  sudo systemctl status archivematica-mcp-server archivematica-mcp-client
-  ```
+Nginx reindirizza HTTP → HTTPS. Usare `https://` nell'URL:
+```bash
+SS_URL=https://192.168.139.39:8000
+```
 
-### Errore 400 "Unable to determine the status of the unit"
+### 401 Unauthorized
 
-Errore transitorio nei primi secondi dopo l'avvio del transfer (Archivematica
-non ha ancora registrato l'unità). Lo script ritenta automaticamente fino a
-**2 volte extra**, attendendo **20 secondi** ogni volta. Se l'errore persiste
-oltre questi tentativi, verificare lo stato dei servizi MCP.
+Le API key sono vuote o errate. Verificare `AM_API_KEY` e `SS_API_KEY` nel `.env`.
 
-### La processing configuration scelta non viene applicata
+### 404 Not Found sulla Transfer Source UUID
 
-- Verifica che il file esista con il nome corretto:
-  ```bash
-  ls /var/archivematica/sharedDirectory/sharedMicroServiceTasksConfigs/processingMCPConfigs/
-  ```
-  Il file deve chiamarsi `<nome>ProcessingMCP.xml` (es.
-  `dataverse_001ProcessingMCP.xml`)
-- Lo script copia questo file come `processingMCP.xml` nella radice del
-  pacchetto **prima** di avviare il transfer — verifica la riga di debug:
-  ```
-  [debug] processingMCP.xml ('dataverse_001') copiato in .../processingMCP.xml
-  ```
-- Se compare `[AVVISO] ... non trovata`, il nome passato a
-  `--processing-config` non corrisponde a nessun file presente
+L'UUID nel `.env` non esiste su questo server Archivematica. Recuperare quello
+corretto:
+```bash
+python3 archivematica_ingest.py --no-verify-ssl --list-sources
+```
 
-### Transfer rifiutato (REJECTED)
+### Valori dal .env ignorati
 
-Controlla nel Dashboard: **Transfer → Failed/Rejected transfers** per il log
-dettagliato del microservice che ha causato il rifiuto.
+Probabile che variabili siano state esportate in precedenza con `export`.
+Aprire una nuova sessione shell oppure:
+```bash
+unset SS_URL AM_URL AM_API_KEY SS_API_KEY AM_USER SS_USER AM_TRANSFER_SOURCE_UUID SSL_VERIFY
+```
+
+### SSL Certificate Verify Failed
+
+```
+SSLCertVerificationError: certificate verify failed: self-signed certificate
+```
+Aggiungere `SSL_VERIFY=false` nel `.env` oppure usare `--no-verify-ssl`.
+
+### Permission Denied su processingMCPConfigs
+
+```
+PermissionError: [Errno 13] Permission denied: '/var/archivematica/...'
+```
+Aggiungere l'utente al gruppo `archivematica`:
+```bash
+sudo usermod -aG archivematica <utente>
+# Poi fare logout e login
+```
+
+### 400 "Unable to determine the status of the unit"
+
+Errore transitorio: Archivematica non ha ancora registrato il transfer.
+Lo script ritenta automaticamente (2 volte, 20 secondi di attesa).
+Se persiste, verificare i servizi:
+```bash
+sudo systemctl status archivematica-mcp-server archivematica-mcp-client
+```
 
 ### Elasticsearch non raggiungibile
 
 ```
-elastic_transport.ConnectionError: ... Connection refused ... 127.0.0.1:9200
+elastic_transport.ConnectionError: Connection refused ... 127.0.0.1:9200
 ```
-
-Riavvia Elasticsearch:
 ```bash
-sudo systemctl status elasticsearch
 sudo systemctl start elasticsearch
 curl -s http://localhost:9200
 ```
 
+### Transfer non appare nel Dashboard
+
+Verificare che la cartella sia stata copiata nella watched directory:
+```bash
+ls /var/archivematica/sharedDirectory/watchedDirectories/activeTransfers/standardTransfer/
+```
+
 ---
 
-## 8. Esempio di esecuzione completa
+## 9. Esempio di esecuzione completa
+
+### Configurazione iniziale (una tantum)
 
 ```bash
-# 1. Configurazione ambiente (una tantum, in ~/.bashrc o simile)
-export DATAVERSE_API_KEY="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-export AM_API_KEY="yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
-export SS_API_KEY="zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
-export AM_TRANSFER_SOURCE_UUID="5740049b-8b06-425b-bea6-126c799b6113"
+# Clona il repository
+git clone https://github.com/zfed/Arkive.git
+cd Arkive/tools/dataverse-archivematica
 
-TRANSFER_SOURCE="/mnt/e/DROPBOX/Dropbox/_ARKIVE/TRANSFER_SOURCE"
+# Installa dipendenze
+pip install requests --break-system-packages
 
-# 2. Preparare l'elenco dei DOI da archiviare
+# Crea il file .env
+cp .env.template .env
+nano .env
+
+# Recupera l'UUID della Transfer Source
+python3 archivematica_ingest.py --no-verify-ssl --list-sources
+
+# Aggiorna AM_TRANSFER_SOURCE_UUID nel .env con l'UUID trovato
+
+# Verifica le processing configuration disponibili
+python3 archivematica_ingest.py --no-verify-ssl --list-processing-configs
+```
+
+### Esecuzione
+
+```bash
+# 1. Prepara l'elenco dei DOI
 cat > dois.txt << 'EOF'
 doi:10.13130/RD_UNIMI/KS2PUX
 doi:10.13130/RD_UNIMI/NFURUT
 doi:10.13130/RD_UNIMI/QBRJNN
 EOF
 
-# 3. Scaricare i dataset direttamente nella Transfer Source
-python scarica_dataverse.py \
-  --dois dois.txt \
-  --output "$TRANSFER_SOURCE"
+# 2. Scarica i dataset nella Transfer Source
+python3 scarica_dataverse.py \
+  --output /mnt/e/DROPBOX/Dropbox/_ARKIVE/TRANSFER_SOURCE
 
-# 4. Trasferire e ingestare in Archivematica
-python archivematica_ingest.py \
-  --processing-config dataverse_001
+# 3. Trasferisci e ingesta in Archivematica
+python3 archivematica_ingest.py --no-verify-ssl
 
-# 5. (Facoltativo) Verificare lo stato
+# 4. Verifica lo stato
 cat stato_archivematica.json | python3 -m json.tool
 ```
 
-Per le esecuzioni successive (es. nuovi DOI aggiunti a `dois.txt`, o nuove
-versioni pubblicate dei dataset esistenti), è sufficiente ripetere i passi
-3 e 4: entrambi gli script elaborano solo ciò che è nuovo o non ancora
-completato.
+Per le esecuzioni successive, ripetere i passi 2 e 3: gli script elaborano
+solo ciò che è nuovo o non ancora completato.
+

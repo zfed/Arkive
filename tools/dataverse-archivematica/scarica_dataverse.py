@@ -2,11 +2,6 @@
 """
 scarica_dataverse.py
 --------------------
-Autore: Federica Zanardini
-Università degli Studi di Milano - Direzione ICT
-Data: 2026-06
-Sviluppato con il supporto di Claude AI (Anthropic)
-
 Scarica TUTTE LE VERSIONI di ogni dataset (+ metadati JSON) da dataverse.unimi.it
 sulla base dei DOI contenuti in dois.txt.
 
@@ -48,9 +43,32 @@ import os
 import re
 import sys
 import time
+import urllib3
 from pathlib import Path
 
 import requests
+
+def _load_dotenv(env_file: str = ".env") -> None:
+    """
+    Carica variabili da un file .env senza dipendenze esterne.
+    Formato supportato: KEY=value, ignora righe vuote e commenti (#).
+    Le variabili già presenti nell'ambiente non vengono sovrascritte.
+    """
+    p = Path(env_file)
+    if not p.exists():
+        return
+    with open(p, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key   = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+_load_dotenv()
 
 # ── Configurazione ────────────────────────────────────────────────────────────
 
@@ -64,6 +82,9 @@ PAUSE_BETWEEN_DOIS = 2    # secondi di cortesia tra DOI diversi
 
 # API key Dataverse — lasciare "" per usare --apikey o la variabile d'ambiente
 API_KEY = ""
+
+# Verifica certificato SSL (False per certificati self-signed)
+SSL_VERIFY = True
 
 # ── Utility ───────────────────────────────────────────────────────────────────
 
@@ -96,6 +117,9 @@ def load_dois(path: str) -> list[str]:
 # Chiave attiva — impostata da main() dopo aver risolto la priorità
 _active_api_key: str = ""
 
+# Verifica SSL attiva — impostata da main()
+_ssl_verify: bool = True
+
 
 def resolve_api_key(cli_value: str) -> str:
     """
@@ -124,12 +148,15 @@ def get_with_retry(url: str, params: dict = None, stream: bool = False):
     """GET con retry automatico; rilancia subito su 404."""
     for attempt in range(1, RETRY_ATTEMPTS + 1):
         try:
+            if not _ssl_verify:
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
             r = requests.get(
                 url,
                 params=params,
                 headers=_build_headers(),
                 timeout=REQUEST_TIMEOUT,
                 stream=stream,
+                verify=_ssl_verify,
             )
             r.raise_for_status()
             return r
@@ -581,11 +608,22 @@ def main():
         "--apikey", default="",
         help="API key Dataverse (sovrascrive la variabile d'ambiente e la costante API_KEY)"
     )
+    parser.add_argument(
+        "--no-verify-ssl", action="store_true",
+        help="Disabilita la verifica SSL (utile con certificati self-signed). "
+             "Equivalente a SSL_VERIFY=false nel .env"
+    )
     args = parser.parse_args()
 
     # Risolvi e attiva la API key globalmente
-    global _active_api_key
+    global _active_api_key, _ssl_verify
     _active_api_key = resolve_api_key(args.apikey)
+
+    # Verifica SSL
+    env_ssl = os.environ.get("SSL_VERIFY", "true").lower()
+    if args.no_verify_ssl or env_ssl in ("false", "0", "no"):
+        _ssl_verify = False
+        print("[AVVISO] Verifica certificato SSL disabilitata.")
 
     dois        = load_dois(args.dois)
     output_root = Path(args.output)
@@ -598,6 +636,7 @@ def main():
     print(f"  Sorgente DOI : {args.dois}  ({len(dois)} DOI)")
     print(f"  Destinazione : {output_root.resolve()}")
     print(f"  API key      : {key_display}")
+    print(f"  SSL verify   : {_ssl_verify}")
     print(f"{'='*62}\n")
 
     summary = []
@@ -642,3 +681,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
