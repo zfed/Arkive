@@ -9,13 +9,47 @@ Sviluppato con il supporto di Claude AI (Anthropic)
 Riferimento ufficiale: https://wiki.archivematica.org/Storage_Service_API
 
 Configurazione (variabili d'ambiente):
-    SS_BASE_URL   es. http://localhost:8000
-    SS_USERNAME   utente API dello Storage Service
-    SS_API_KEY    API key dell'utente (Storage Service > Administration > Users)
+    SS_BASE_URL          es. http://localhost:8000
+    SS_USERNAME          utente API dello Storage Service
+    SS_API_KEY           API key dell'utente (Storage Service > Administration > Users)
+    SS_CA_CERT           (opzionale) percorso di un certificato CA/self-signed da usare
+                         per la verifica HTTPS, se lo Storage Service non utilizza un
+                         certificato firmato da un'autorita' riconosciuta pubblicamente.
+                         Se omessa, viene usata la normale verifica di sistema.
+    SS_IGNORE_HOSTNAME   (opzionale) se impostata a "1", disabilita il controllo di
+                         corrispondenza tra l'host contattato e il nome presente nel
+                         certificato (utile se il certificato e' valido ma associato
+                         a un nome host diverso da quello usato per la connessione,
+                         es. server duplicati/cloni con lo stesso certificato).
+                         Il certificato resta comunque verificato (tramite SS_CA_CERT
+                         o il bundle di sistema): viene disabilitato solo il confronto
+                         del nome. Da usare con consapevolezza, solo su reti fidate.
 """
 import os
 
 import requests
+
+
+def _disable_urllib3_hostname_check():
+    """Disabilita il controllo di corrispondenza hostname/certificato di urllib3.
+
+    Nelle versioni 1.x di urllib3 (es. 1.26.x, installata via apt su Debian/
+    Ubuntu) il controllo del nome host non e' delegato al modulo ssl standard
+    di Python (per cui non basta impostare ssl_context.check_hostname=False),
+    ma viene fatto internamente da urllib3 stesso tramite una propria funzione
+    match_hostname. Per disabilitarlo davvero occorre sostituire quella
+    funzione con una versione che non genera errori.
+    """
+    try:
+        import urllib3.util.ssl_ as ssl_
+        ssl_.match_hostname = lambda cert, hostname: None
+    except (ImportError, AttributeError):
+        pass
+    try:
+        import urllib3.connection as connection
+        connection.match_hostname = lambda cert, hostname: None
+    except (ImportError, AttributeError):
+        pass
 
 
 class StorageServiceError(Exception):
@@ -40,6 +74,18 @@ class StorageServiceClient:
             "Authorization": f"ApiKey {self.username}:{self.api_key}",
             "Accept": "application/json",
         })
+
+        # Verifica HTTPS: di default usa il bundle di certificati di sistema.
+        # Se SS_CA_CERT e' impostata, usa quel certificato specifico al posto
+        # del bundle di sistema (utile per Storage Service con certificato
+        # self-signed su rete interna fidata).
+        ca_cert = os.environ.get("SS_CA_CERT", "")
+        self.session.verify = ca_cert if ca_cert else True
+
+        # Se richiesto, disabilita il controllo di corrispondenza hostname
+        # (vedi SS_IGNORE_HOSTNAME nella docstring del modulo).
+        if os.environ.get("SS_IGNORE_HOSTNAME", "") == "1":
+            _disable_urllib3_hostname_check()
 
     def _url(self, path):
         return f"{self.base_url}{path}"

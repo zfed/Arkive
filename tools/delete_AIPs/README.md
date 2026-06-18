@@ -36,11 +36,40 @@ cp .env.example .env
 | `SS_BASE_URL` | URL dello Storage Service (es. `http://localhost:8000`) |
 | `SS_USERNAME` | Utente API dello Storage Service |
 | `SS_API_KEY` | API key dell'utente (Storage Service → Administration → Users) |
+| `SS_CA_CERT` | *(opzionale)* percorso di un certificato CA/self-signed, se lo Storage Service usa HTTPS con un certificato non firmato da un'autorità pubblica (vedi sotto) |
+| `SS_IGNORE_HOSTNAME` | *(opzionale)* impostare a `1` se il certificato è valido ma associato a un nome host diverso da quello contattato — es. server duplicati/cloni con lo stesso certificato (vedi sotto) |
 | `SS_PIPELINE_UUID` | UUID della pipeline Archivematica |
 | `SS_USER_ID` | ID numerico dell'utente Archivematica (non lo username — vedi nota sotto) |
 | `SS_USER_EMAIL` | Email dell'utente Archivematica |
 
 > Per trovare `SS_USER_ID`: accedi al dashboard di Archivematica come amministratore, vai in *Administration → Users*, apri l'utente desiderato e leggi l'ID dalla URL (es. `.../administration/accounts/3/edit/` → `user_id=3`).
+
+### Certificato self-signed
+
+Se lo Storage Service è esposto in HTTPS con un certificato self-signed (comune su reti interne), recupera il certificato e indicane il percorso in `SS_CA_CERT`:
+
+```bash
+openssl s_client -connect <host>:443 -showcerts </dev/null 2>/dev/null \
+  | openssl x509 -outform PEM > certs/storage_service.pem
+```
+
+```
+SS_CA_CERT=./certs/storage_service.pem
+```
+
+Se `SS_CA_CERT` non è impostata, viene usata la normale verifica con i certificati di sistema.
+
+### Hostname che non corrisponde al certificato
+
+Se il certificato è valido (anche tramite `SS_CA_CERT`) ma riporta un nome host diverso da quello con cui ti connetti — ad esempio perché un server di test ha "ereditato" per errore il certificato di un altro server — otterrai un errore tipo `hostname '...' doesn't match '...'`.
+
+In questo caso, se conosci la causa e ti fidi della rete, puoi impostare:
+
+```
+SS_IGNORE_HOSTNAME=1
+```
+
+Questo disabilita solo il controllo del nome host, mantenendo la verifica del certificato stesso (tramite `SS_CA_CERT` o il bundle di sistema). Da usare con consapevolezza: rimuove una protezione contro server "impostori" sulla stessa rete.
 
 ## Utilizzo
 
@@ -73,3 +102,4 @@ Autore: Federica Zanardini — Università degli Studi di Milano, Direzione ICT
 Sviluppato con il supporto di Claude AI (Anthropic)
 
 Distribuito con licenza [MIT](../../LICENSE).
+
