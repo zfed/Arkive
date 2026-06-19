@@ -142,6 +142,7 @@ PROCESSING_CONFIGS_DIR = (
 POLL_INTERVAL        = 15    # secondi tra un polling e l'altro
 UNIT_NOT_FOUND_WAIT    = 20   # secondi di attesa se l'unità non è ancora registrata
 UNIT_NOT_FOUND_RETRIES = 2    # numero di tentativi extra in caso di unità non trovata
+APPROVE_TRANSFER_WAIT  = 10   # secondi di attesa prima di tentare l'approve automatico
 POLL_MAX_WAIT        = 7200  # secondi massimi di attesa (2 ore)
 REQUEST_TIMEOUT      = 30
 
@@ -467,6 +468,94 @@ def poll_transfer(
     )
 
 
+# ── Approve Transfer automatico ───────────────────────────────────────────────
+
+def approve_transfer(
+    am_url: str, am_user: str, am_key: str,
+    transfer_name: str,
+    transfer_type: str = "standard",
+) -> bool:
+    """
+    Approva automaticamente un transfer in attesa tramite l'API Archivematica.
+
+    Archivematica aggiunge un UUID al nome nella watched directory
+    (es. AIP-20260619-doi_...-<uuid>/), quindi recupera prima i transfer
+    in attesa tramite /api/transfer/unapproved/ e trova quello corrispondente
+    al nome del pacchetto, poi lo approva con /api/transfer/approve/.
+    """
+    h = am_headers(am_key, am_user)
+    max_retries = 5
+
+    for attempt in range(1, max_retries + 1):
+        # Attendi che il transfer sia visibile nella coda
+        wait = APPROVE_TRANSFER_WAIT if attempt == 1 else APPROVE_TRANSFER_WAIT * 2
+        print(f"    [approve] Attendo {wait}s prima di cercare il transfer "
+              f"in attesa (tentativo {attempt}/{max_retries}) ...")
+        time.sleep(wait)
+
+        # Recupera i transfer in attesa di approvazione
+        try:
+            r = requests.get(
+                f"{am_url}/api/transfer/unapproved/",
+                headers=h, timeout=REQUEST_TIMEOUT, verify=_ssl_verify
+            )
+            if not r.ok:
+                print(f"    [approve] Errore nel recupero unapproved: "
+                      f"HTTP {r.status_code}")
+                continue
+            unapproved = r.json().get("results", [])
+        except requests.exceptions.RequestException as e:
+            print(f"    [approve] Errore rete: {e}")
+            continue
+
+        if not unapproved:
+            print(f"    [approve] Nessun transfer in attesa trovato.")
+            continue
+
+        # Cerca il transfer che corrisponde al nostro nome
+        match = None
+        for t in unapproved:
+            directory = t.get("directory", "")
+            # Il nome nella watched dir contiene il nostro transfer_name
+            if transfer_name in directory:
+                match = t
+                break
+
+        if not match:
+            print(f"    [approve] Transfer '{transfer_name}' non trovato "
+                  f"tra i {len(unapproved)} in attesa.")
+            # Stampa quelli disponibili per debug
+            for t in unapproved:
+                print(f"      - {t.get('directory', '?')}")
+            continue
+
+        # Approva il transfer trovato
+        directory = match.get("directory", "")
+        print(f"    [approve] Trovato: {directory} — invio approvazione ...")
+        try:
+            r = requests.post(
+                f"{am_url}/api/transfer/approve/",
+                headers=h,
+                data={"directory": directory, "type": transfer_type},
+                timeout=REQUEST_TIMEOUT,
+                verify=_ssl_verify
+            )
+            if r.ok:
+                data = r.json()
+                if data.get("uuid"):
+                    print(f"    [approve] Approvato (UUID: {data['uuid']})")
+                    return True
+                print(f"    [approve] Risposta inattesa: {data}")
+                return False
+            print(f"    [approve] HTTP {r.status_code}: {r.text[:300]}")
+        except requests.exceptions.RequestException as e:
+            print(f"    [approve] Errore rete nell'approvazione: {e}")
+
+    print(f"    [AVVISO] Impossibile approvare automaticamente dopo "
+          f"{max_retries} tentativi. Approvare manualmente dal Dashboard.")
+    return False
+
+
 # ── Polling Ingest ────────────────────────────────────────────────────────────
 
 def poll_ingest(
@@ -613,6 +702,14 @@ def process_doi_package(
 
     try:
         # ── 1. Avvio Transfer ─────────────────────────────────────────────────
+        # Se il record ha uno stato di errore o un transfer precedente
+        # fallito/rifiutato, azzera il transfer_uuid per ripartire da zero
+        if record.get("status") in ("failed",) and record.get("transfer_uuid"):
+            print(f"    [info] Transfer precedente fallito/rifiutato — riavvio da zero.")
+            record.pop("transfer_uuid", None)
+            record.pop("sip_uuid", None)
+            record.pop("aip_uuid", None)
+
         if not record.get("transfer_uuid"):
             # Applica la processing configuration scelta copiando
             # processingMCP.xml nella radice del pacchetto
@@ -638,7 +735,14 @@ def process_doi_package(
             transfer_uuid = record["transfer_uuid"]
             print(f"    Transfer UUID (ripresa): {transfer_uuid}")
 
-        # ── 2. Polling Transfer ───────────────────────────────────────────────
+        # ── 2. Approve Transfer automatico (se richiesto) ───────────────────────
+        if not record.get("sip_uuid") and args.auto_approve:
+            approve_transfer(
+                args.am_url, args.am_user, args.am_apikey,
+                transfer_name, args.transfer_type,
+            )
+
+        # ── 3. Polling Transfer ───────────────────────────────────────────────
         if not record.get("sip_uuid"):
             print(f"    Attendo completamento transfer ...")
             _, sip_uuid = poll_transfer(
@@ -726,6 +830,10 @@ def main():
             "Disabilita la verifica del certificato SSL (utile con certificati "
             "self-signed). Equivalente a impostare SSL_VERIFY=false nel .env"
         ))
+    parser.add_argument("--auto-approve",  action="store_true",
+        help="Approva automaticamente il transfer via API invece di aspettare "
+             "conferma manuale (utile se la processing config non ha Approve Transfer "
+             "pre-configurato)")
     parser.add_argument("--list-sources",  action="store_true",
         help="Elenca le Transfer Source Locations disponibili ed esce")
     parser.add_argument("--list-processing-configs", action="store_true",
@@ -766,6 +874,8 @@ def main():
         args.transfer_source = os.environ.get(
             "AM_TRANSFER_SOURCE_UUID", TRANSFER_SOURCE_UUID
         )
+    if not args.auto_approve:
+        args.auto_approve = os.environ.get("AM_AUTO_APPROVE", "false").lower() in ("true", "1", "yes")
     if args.transfer_type == TRANSFER_TYPE:
         args.transfer_type = os.environ.get("AM_TRANSFER_TYPE", TRANSFER_TYPE)
     if args.processing_config == PROCESSING_CONFIG:
@@ -809,10 +919,11 @@ def main():
             )
             if not sources:
                 print("  (nessuna trovata)")
-            for s in sources:
-                print(f"  UUID : {s['uuid']}")
-                print(f"  Path : {s.get('path', '?')}")
-                print(f"  Desc : {s.get('description', '')}\n")
+            else:
+                for s in sources:
+                    print(f"  UUID : {s['uuid']}")
+                    print(f"  Path : {s.get('path', '?')}")
+                    print(f"  Desc : {s.get('description', '')}\n")
         except Exception as e:
             print(f"[ERRORE] {e}")
         sys.exit(0)
@@ -887,6 +998,7 @@ def main():
     print(f"  Transfer Src  : {args.transfer_source}")
     print(f"  Transfer type : {args.transfer_type}")
     print(f"  Processing cfg: {args.processing_config}")
+    print(f"  Auto-approve  : {args.auto_approve}")
     print(f"  File di stato : {args.state_file}")
     print(f"  SSL verify    : {_ssl_verify}")
     if args.dry_run:
@@ -940,4 +1052,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
