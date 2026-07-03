@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-
 """
 scarica_dataverse.py
 --------------------
@@ -8,42 +7,45 @@ sulla base dei DOI contenuti in dois.txt.
 
 Struttura output (compatibile con Archivematica):
 
-DATASET_TRASFERITI/
-  <doi_sanitizzato>/
-    objects/
-      v1.0/
-        objects/           ← file del dataset
-          file1.csv
-        metadata/          ← metadati Dataverse della versione
-          dataverse.json
-          metadata.csv     ← DC per questa versione (preservation)
-          dcat.json        ← DCAT-AP JSON-LD generato localmente (solo se EXPORT_DCAT=true)
-          schema.json      ← Schema.org JSON-LD da API Dataverse  (solo se EXPORT_DCAT=true)
-      v2.0/
-        objects/
-          file2.csv
-        metadata/
-          dataverse.json
-          metadata.csv
-          dcat.json        ← DCAT-AP JSON-LD generato localmente (solo se EXPORT_DCAT=true)
-          schema.json      ← Schema.org JSON-LD da API Dataverse  (solo se EXPORT_DCAT=true)
-    metadata/
-      metadata.csv         ← DC per TUTTE le versioni (letto da Archivematica)
+  DATASET_TRASFERITI/
+    <doi_sanitizzato>/
+      objects/
+        v1.0/
+          objects/           <- file del dataset
+            file1.csv
+          metadata/          <- metadati Dataverse della versione
+            dataverse.json
+            metadata.csv     <- DC per questa versione (preservation)
+            dcat.json        <- DCAT-AP JSON-LD (solo se EXPORT_DCAT=true)
+            schema.json      <- Schema.org JSON-LD (solo se EXPORT_DCAT=true)
+        v2.0/
+          objects/
+            file2.csv
+          metadata/
+            dataverse.json
+            metadata.csv
+            dcat.json        <- (solo se EXPORT_DCAT=true)
+            schema.json      <- (solo se EXPORT_DCAT=true)
+      metadata/
+        metadata.csv         <- DC per TUTTE le versioni (letto da Archivematica)
+  riepilogo_download.json
+  doi_vuoti.json             <- DOI senza file (non viene creata la directory)
 
 Nota DCAT: il file dcat.json viene generato localmente a partire dai metadati
-già scaricati (dataverse.json), senza chiamate HTTP aggiuntive. Ogni versione
+gia' scaricati (dataverse.json), senza chiamate HTTP aggiuntive. Ogni versione
 produce il proprio dcat.json con i metadati della versione specifica.
 
-La API key può essere fornita in tre modi (ordine di priorità):
+La API key puo' essere fornita in tre modi (ordine di priorita'):
   1. Argomento da riga di comando: --apikey <chiave>
-  2. Variabile d'ambiente: DATAVERSE_API_KEY=<chiave>
+  2. Variabile d'ambiente:         DATAVERSE_API_KEY=<chiave>
   3. Costante API_KEY nel codice (sconsigliato per sicurezza)
 
 Uso:
+  python scarica_dataverse.py
   python scarica_dataverse.py --apikey <chiave>
-  python scarica_dataverse.py --dois mia_lista.txt --output CARTELLA_OUT --apikey <chiave>
-  DATAVERSE_API_KEY=<chiave> python scarica_dataverse.py
-  EXPORT_DCAT=true python scarica_dataverse.py       # abilita generazione DCAT-AP locale
+  python scarica_dataverse.py --dois mia_lista.txt --output CARTELLA_OUT
+  python scarica_dataverse.py --dcat        # abilita DCAT-AP e Schema.org
+  EXPORT_DCAT=true python scarica_dataverse.py
 """
 
 import argparse
@@ -54,6 +56,7 @@ import re
 import sys
 import time
 import urllib3
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -63,7 +66,7 @@ def _load_dotenv(env_file: str = ".env") -> None:
     """
     Carica variabili da un file .env senza dipendenze esterne.
     Formato supportato: KEY=value, ignora righe vuote e commenti (#).
-    Le variabili già presenti nell'ambiente non vengono sovrascritte.
+    Le variabili gia' presenti nell'ambiente non vengono sovrascritte.
     """
     p = Path(env_file)
     if not p.exists():
@@ -74,7 +77,7 @@ def _load_dotenv(env_file: str = ".env") -> None:
             if not line or line.startswith("#") or "=" not in line:
                 continue
             key, _, value = line.partition("=")
-            key = key.strip()
+            key   = key.strip()
             value = value.strip().strip('"').strip("'")
             if key and key not in os.environ:
                 os.environ[key] = value
@@ -84,13 +87,13 @@ _load_dotenv()
 
 # ── Configurazione ────────────────────────────────────────────────────────────
 
-BASE_URL      = "https://dataverse.unimi.it"
-DOIS_FILE     = "dois.txt"
-OUTPUT_DIR    = "DATASET_TRASFERITI"
-RETRY_ATTEMPTS  = 3
-RETRY_DELAY     = 5   # secondi tra tentativi
-REQUEST_TIMEOUT = 60  # secondi per ogni richiesta HTTP
-PAUSE_BETWEEN_DOIS = 2  # secondi di cortesia tra DOI diversi
+BASE_URL           = "https://dataverse.unimi.it"
+DOIS_FILE          = "dois.txt"
+OUTPUT_DIR         = os.environ.get("OUTPUT_DIR", "DATASET_TRASFERITI")
+RETRY_ATTEMPTS     = 3
+RETRY_DELAY        = 5    # secondi tra tentativi
+REQUEST_TIMEOUT    = 60   # secondi per ogni richiesta HTTP
+PAUSE_BETWEEN_DOIS = 2    # secondi di cortesia tra DOI diversi
 
 # API key Dataverse — lasciare "" per usare --apikey o la variabile d'ambiente
 API_KEY = ""
@@ -98,9 +101,8 @@ API_KEY = ""
 # Verifica certificato SSL (False per certificati self-signed)
 SSL_VERIFY = True
 
-# Esportazione DCAT-AP (sovrascrivibile con EXPORT_DCAT=true nel .env)
-_env_dcat = os.environ.get("EXPORT_DCAT", "false").lower()
-EXPORT_DCAT: bool = _env_dcat in ("true", "1", "yes")
+# Esportazione DCAT-AP e Schema.org (sovrascrivibile con EXPORT_DCAT=true nel .env)
+EXPORT_DCAT: bool = os.environ.get("EXPORT_DCAT", "false").lower() in ("true", "1", "yes")
 
 # ── Utility ───────────────────────────────────────────────────────────────────
 
@@ -130,7 +132,7 @@ def load_dois(path: str) -> list[str]:
 
 # ── HTTP helper ───────────────────────────────────────────────────────────────
 
-# Chiave attiva — impostata da main() dopo aver risolto la priorità
+# Chiave attiva — impostata da main() dopo aver risolto la priorita'
 _active_api_key: str = ""
 
 # Verifica SSL attiva — impostata da main()
@@ -139,7 +141,7 @@ _ssl_verify: bool = True
 
 def resolve_api_key(cli_value: str) -> str:
     """
-    Risolve la API key secondo l'ordine di priorità:
+    Risolve la API key secondo l'ordine di priorita':
       1. --apikey da riga di comando
       2. Variabile d'ambiente DATAVERSE_API_KEY
       3. Costante API_KEY nel codice
@@ -195,11 +197,10 @@ def get_all_versions(doi: str) -> list[dict]:
     """
     Restituisce tutte le versioni pubblicate di un dataset.
     Endpoint: GET /api/datasets/:persistentId/versions?persistentId=<doi>
-    Ogni elemento ha: versionNumber, versionMinorNumber, files, metadataBlocks, ecc.
     """
-    url = f"{BASE_URL}/api/datasets/:persistentId/versions"
+    url    = f"{BASE_URL}/api/datasets/:persistentId/versions"
     params = {"persistentId": doi}
-    r = get_with_retry(url, params=params)
+    r      = get_with_retry(url, params=params)
     return r.json().get("data", [])
 
 
@@ -207,12 +208,9 @@ def get_version_export(doi: str, version_str: str,
                        exporter: str = "dataverse_json") -> dict | None:
     """
     Esporta i metadati di una specifica versione.
-    Endpoint: GET /api/datasets/export?exporter=dataverse_json
-                                       &persistentId=<doi>&version=<major.minor>
-    Nota: alcuni exporter di Dataverse ignorano il param version e
-    restituiscono sempre l'ultima; lo salviamo comunque.
+    Endpoint: GET /api/datasets/export?exporter=...&persistentId=<doi>&version=<major.minor>
     """
-    url = f"{BASE_URL}/api/datasets/export"
+    url    = f"{BASE_URL}/api/datasets/export"
     params = {"exporter": exporter, "persistentId": doi, "version": version_str}
     try:
         r = get_with_retry(url, params=params)
@@ -222,21 +220,15 @@ def get_version_export(doi: str, version_str: str,
         return None
 
 
+# ── Generazione DCAT-AP ───────────────────────────────────────────────────────
+
 def _citation_fields(version: dict) -> dict:
-    """
-    Restituisce un dizionario {typeName: field_dict} dai metadataBlocks Dataverse.
-    Usato internamente da build_dcat_from_version().
-    """
-    blocks = version.get("metadataBlocks", {})
+    blocks   = version.get("metadataBlocks", {})
     citation = blocks.get("citation", {}).get("fields", [])
     return {f["typeName"]: f for f in citation}
 
 
 def _compound_values(field: dict, subfield: str) -> list[str]:
-    """
-    Estrae i valori di un sottocampo da un campo compound Dataverse.
-    Es: field = author, subfield = "authorName" → ["Rossi, Mario", "Bianchi, Anna"]
-    """
     values = field.get("value", [])
     if not isinstance(values, list):
         return []
@@ -250,7 +242,6 @@ def _compound_values(field: dict, subfield: str) -> list[str]:
 
 
 def _simple_value(fields: dict, type_name: str) -> str:
-    """Estrae il valore di un campo semplice (stringa o prima stringa di lista)."""
     f = fields.get(type_name)
     if not f:
         return ""
@@ -265,7 +256,6 @@ def _simple_value(fields: dict, type_name: str) -> str:
 
 def _compound_concat(fields: dict, type_name: str, subfield: str,
                      sep: str = " | ") -> str:
-    """Estrae e concatena i valori di un sottocampo compound."""
     f = fields.get(type_name)
     if not f:
         return ""
@@ -274,29 +264,15 @@ def _compound_concat(fields: dict, type_name: str, subfield: str,
 
 def build_dcat_from_version(doi: str, version: dict) -> str:
     """
-    Genera un JSON-LD DCAT-AP 2.x a partire dai metadati di una versione Dataverse.
-    Non effettua chiamate HTTP: usa esclusivamente i dati già in memoria.
-
-    Restituisce una stringa JSON-LD serializzata.
-
-    Mapping principale:
-      title           → dct:title
-      author          → dct:creator (lista)
-      datasetContact  → dcat:contactPoint (vCard)
-      dsDescription   → dct:description
-      subject/keyword → dcat:theme / dcat:keyword
-      productionDate  → dct:issued
-      publisher       → dct:publisher
-      license         → dct:license
-      files           → dcat:distribution (formato, dimensione, checksum)
+    Genera un JSON-LD DCAT-AP 2.x dai metadati di una versione Dataverse.
+    Non effettua chiamate HTTP: usa esclusivamente i dati gia' in memoria.
     """
-    cf = _citation_fields(version)
+    cf      = _citation_fields(version)
     major   = version.get("versionNumber", 0)
     minor   = version.get("versionMinorNumber", 0)
     vtag    = f"{major}.{minor}"
     doi_uri = f"https://doi.org/{doi.replace('doi:', '')}" if doi else ""
 
-    # ── Campi base ────────────────────────────────────────────────────────────
     title       = _simple_value(cf, "title")
     description = _compound_concat(cf, "dsDescription", "dsDescriptionValue", " ")
     issued      = (_simple_value(cf, "productionDate")
@@ -307,7 +283,6 @@ def build_dcat_from_version(doi: str, version: dict) -> str:
     language    = _simple_value(cf, "language")
     publisher   = _simple_value(cf, "publisher")
 
-    # ── Autori ────────────────────────────────────────────────────────────────
     creators = []
     if "author" in cf:
         names  = _compound_values(cf["author"], "authorName")
@@ -319,7 +294,6 @@ def build_dcat_from_version(doi: str, version: dict) -> str:
                                          "foaf:name": affils[i]}
             creators.append(agent)
 
-    # ── Contatto ──────────────────────────────────────────────────────────────
     contact_point = None
     if "datasetContact" in cf:
         contact_names  = _compound_values(cf["datasetContact"], "datasetContactName")
@@ -332,16 +306,14 @@ def build_dcat_from_version(doi: str, version: dict) -> str:
                 vcard["vcard:hasEmail"] = f"mailto:{contact_emails[0]}"
             contact_point = vcard
 
-    # ── Soggetti e parole chiave ───────────────────────────────────────────────
     themes   = []
     keywords = []
     if "subject" in cf:
-        val = cf["subject"].get("value", [])
+        val    = cf["subject"].get("value", [])
         themes = val if isinstance(val, list) else ([val] if val else [])
     if "keyword" in cf:
         keywords = _compound_values(cf["keyword"], "keywordValue")
 
-    # ── Distribuzioni (file) ──────────────────────────────────────────────────
     distributions = []
     for file_info in version.get("files", []):
         df      = file_info.get("dataFile", {})
@@ -351,29 +323,23 @@ def build_dcat_from_version(doi: str, version: dict) -> str:
         size    = df.get("fileSize") or df.get("filesize")
         md5     = df.get("md5", "")
 
-        dist: dict = {
-            "@type":    "dcat:Distribution",
-            "dct:title": label,
-        }
+        dist: dict = {"@type": "dcat:Distribution", "dct:title": label}
         if file_id:
-            dist["dcat:accessURL"] = {
-                "@id": f"{BASE_URL}/api/access/datafile/{file_id}"
-            }
+            dist["dcat:accessURL"] = {"@id": f"{BASE_URL}/api/access/datafile/{file_id}"}
         if mime:
             dist["dcat:mediaType"] = mime
         if size:
             dist["dcat:byteSize"] = size
         if md5:
             dist["spdx:checksum"] = {
-                "@type":          "spdx:Checksum",
-                "spdx:algorithm": "spdx:checksumAlgorithm_md5",
+                "@type":              "spdx:Checksum",
+                "spdx:algorithm":     "spdx:checksumAlgorithm_md5",
                 "spdx:checksumValue": md5,
             }
         if license_val:
             dist["dct:license"] = license_val
         distributions.append(dist)
 
-    # ── Struttura JSON-LD ────────────────────────────────────────────────────
     dataset: dict = {
         "@context": {
             "dcat":  "http://www.w3.org/ns/dcat#",
@@ -385,18 +351,15 @@ def build_dcat_from_version(doi: str, version: dict) -> str:
             "xsd":   "http://www.w3.org/2001/XMLSchema#",
             "owl":   "http://www.w3.org/2002/07/owl#",
         },
-        "@type":          "dcat:Dataset",
-        "@id":            doi_uri,
-        "dct:identifier": doi,
+        "@type":           "dcat:Dataset",
+        "@id":             doi_uri,
+        "dct:identifier":  doi,
         "owl:versionInfo": vtag,
     }
 
-    if title:
-        dataset["dct:title"] = title
-    if description:
-        dataset["dct:description"] = description
-    if issued:
-        dataset["dct:issued"] = {"@type": "xsd:date", "@value": issued}
+    if title:       dataset["dct:title"]       = title
+    if description: dataset["dct:description"] = description
+    if issued:      dataset["dct:issued"]      = {"@type": "xsd:date", "@value": issued}
     if modified and modified != issued:
         dataset["dct:modified"] = {"@type": "xsd:date", "@value": modified}
     if creators:
@@ -405,28 +368,23 @@ def build_dcat_from_version(doi: str, version: dict) -> str:
         dataset["dct:publisher"] = {"@type": "foaf:Organization", "foaf:name": publisher}
     if contact_point:
         dataset["dcat:contactPoint"] = contact_point
-    if themes:
-        dataset["dcat:theme"] = themes
-    if keywords:
-        dataset["dcat:keyword"] = keywords
-    if license_val:
-        dataset["dct:license"] = license_val
-    if language:
-        dataset["dct:language"] = language
+    if themes:    dataset["dcat:theme"]        = themes
+    if keywords:  dataset["dcat:keyword"]      = keywords
+    if license_val: dataset["dct:license"]     = license_val
+    if language:  dataset["dct:language"]      = language
     if distributions:
         dataset["dcat:distribution"] = distributions
 
     return json.dumps(dataset, ensure_ascii=False, indent=2)
 
 
+# ── Download file ─────────────────────────────────────────────────────────────
+
 def download_file(file_info: dict, data_dir: Path) -> bool:
-    """
-    Scarica un singolo file del dataset nella sottocartella data/.
-    Restituisce True se riuscito (o già presente).
-    """
-    df = file_info.get("dataFile", {})
+    """Scarica un singolo file del dataset. Restituisce True se riuscito."""
+    df      = file_info.get("dataFile", {})
     file_id = df.get("id")
-    label = file_info.get("label") or df.get("filename") or f"file_{file_id}"
+    label   = file_info.get("label") or df.get("filename") or f"file_{file_id}"
 
     if file_id is None:
         print(f"  [ATTENZIONE] ID file mancante, salto: {label}")
@@ -434,11 +392,11 @@ def download_file(file_info: dict, data_dir: Path) -> bool:
 
     dest = data_dir / label
     if dest.exists() and dest.stat().st_size > 0:
-        print(f"  [SKIP] Già presente: {label}")
+        print(f"      [SKIP] Gia' presente: {label}")
         return True
 
     url = f"{BASE_URL}/api/access/datafile/{file_id}"
-    print(f"  Scarico: {label} ...", end=" ", flush=True)
+    print(f"      Scarico: {label} ...", end=" ", flush=True)
     try:
         r = get_with_retry(url, stream=True)
         with open(dest, "wb") as f:
@@ -454,19 +412,14 @@ def download_file(file_info: dict, data_dir: Path) -> bool:
 
 # ── Generazione metadata.csv per Archivematica ───────────────────────────────
 
-# Prefissi Dublin Core accettati da Archivematica
 DC_VALID_PREFIXES = ("dc.", "dcterms.")
-
-# Caratteri vietati nei path filename di metadata.json
-FORBIDDEN_CHARS = re.compile(r'[\x00-\x1f\x7f]')
+FORBIDDEN_CHARS   = re.compile(r'[\x00-\x1f\x7f]')
 
 
 def _dc_value(fields: list[dict], field_type_name: str) -> str:
-    """Estrae il primo valore di un campo Dublin Core dai metadataBlocks Dataverse."""
     for f in fields:
         if f.get("typeName") == field_type_name:
             val = f.get("value", "")
-            # Può essere stringa, lista di stringhe, o lista di dict
             if isinstance(val, str):
                 return val.strip()
             if isinstance(val, list):
@@ -475,7 +428,6 @@ def _dc_value(fields: list[dict], field_type_name: str) -> str:
                     if isinstance(item, str):
                         parts.append(item.strip())
                     elif isinstance(item, dict):
-                        # es. author: {authorName: {value: "..."}}
                         for sub in item.values():
                             if isinstance(sub, dict) and "value" in sub:
                                 parts.append(str(sub["value"]).strip())
@@ -484,9 +436,8 @@ def _dc_value(fields: list[dict], field_type_name: str) -> str:
 
 
 def _dc_fields_from_version(version: dict) -> dict:
-    """Estrae un dizionario dei campi Dublin Core da una versione Dataverse."""
     citation = {}
-    blocks = version.get("metadataBlocks", {})
+    blocks   = version.get("metadataBlocks", {})
     if "citation" in blocks:
         for f in blocks["citation"].get("fields", []):
             citation[f["typeName"]] = f
@@ -497,8 +448,8 @@ def _dc_fields_from_version(version: dict) -> dict:
     return {
         "title":       get("title"),
         "authors":     get("authorName") or get("author"),
-        "date":        get("productionDate") or get("distributionDate")
-                       or version.get("releaseTime", "")[:10],
+        "date":        (get("productionDate") or get("distributionDate")
+                        or version.get("releaseTime", "")[:10]),
         "description": get("dsDescription") or get("description"),
         "identifier":  version.get("datasetPersistentId", ""),
         "publisher":   get("publisher") or get("datasetContact"),
@@ -508,10 +459,8 @@ def _dc_fields_from_version(version: dict) -> dict:
 
 
 def _write_version_csv(version: dict, data_dir: Path, ver_meta_dir: Path) -> None:
-    """Scrive metadata.csv DC per una singola versione in objects/<vtag>/metadata/."""
-    import csv as _csv
-
-    dc = _dc_fields_from_version(version)
+    """Scrive metadata.csv DC per una singola versione."""
+    dc           = _dc_fields_from_version(version)
     subjects_str = dc["subjects"] or ""
 
     files_in_objects = sorted(
@@ -531,41 +480,27 @@ def _write_version_csv(version: dict, data_dir: Path, ver_meta_dir: Path) -> Non
              "dc.type": "Dataset"} for fp in targets]
 
     with open(ver_meta_dir / "metadata.csv", "w", encoding="utf-8", newline="") as f:
-        writer = _csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
-    print(f"  [metadata] metadata.csv (versione) generato ({len(rows)} righe)")
+    print(f"    [metadata] metadata.csv (versione) generato ({len(rows)} righe)")
 
 
 def write_archivematica_metadata(versions: list[dict], doi_dir: Path,
                                  meta_dir: Path) -> None:
-    """
-    Genera <doi_dir>/metadata/metadata.csv nel formato richiesto da Archivematica.
-    Una riga per ogni file in objects/, con campi Dublin Core estratti dai
-    metadataBlocks Dataverse. Il path in "filename" inizia sempre con "objects/".
-    """
-    fieldnames = [
-        "filename",
-        "dc.title",
-        "dc.creator",
-        "dc.date",
-        "dc.description",
-        "dc.identifier",
-        "dc.publisher",
-        "dc.rights",
-        "dc.subject",
-        "dc.type",
-    ]
-
+    """Genera <doi_dir>/metadata/metadata.csv per Archivematica (METS dmdSec)."""
+    fieldnames = ["filename", "dc.title", "dc.creator", "dc.date", "dc.description",
+                  "dc.identifier", "dc.publisher", "dc.rights", "dc.subject", "dc.type"]
     rows = []
+
     for version in versions:
         major = version.get("versionNumber", 0)
         minor = version.get("versionMinorNumber", 0)
         vtag  = version_tag(major, minor)
         dc    = _dc_fields_from_version(version)
 
-        objects_dir = doi_dir / "objects" / vtag / "objects"
+        objects_dir      = doi_dir / "objects" / vtag / "objects"
         files_in_objects = sorted(
             [f.name for f in objects_dir.iterdir() if f.is_file()]
         ) if objects_dir.exists() else []
@@ -587,10 +522,9 @@ def write_archivematica_metadata(versions: list[dict], doi_dir: Path,
                 "dc.type":        "Dataset",
             })
 
-    import csv as _csv
     csv_path = meta_dir / "metadata.csv"
     with open(csv_path, "w", encoding="utf-8", newline="") as f:
-        writer = _csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
@@ -599,37 +533,29 @@ def write_archivematica_metadata(versions: list[dict], doi_dir: Path,
 
 
 def validate_metadata_csv(csv_path: Path) -> list[str]:
-    """
-    Valida metadata.csv rispetto ai requisiti di Archivematica.
-    Restituisce una lista di messaggi di errore/avviso (vuota = tutto OK).
-    """
+    """Valida metadata.csv. Restituisce lista di errori/avvisi."""
     issues = []
     try:
         raw = csv_path.read_bytes().decode("utf-8")
     except UnicodeDecodeError as e:
-        issues.append(f"[ERRORE] Encoding non UTF-8: {e}")
-        return issues
+        return [f"[ERRORE] Encoding non UTF-8: {e}"]
 
     import io
-    reader = csv.DictReader(io.StringIO(raw))
+    reader  = csv.DictReader(io.StringIO(raw))
     headers = reader.fieldnames or []
 
     if not headers:
-        issues.append("[ERRORE] Il CSV è vuoto o senza intestazione.")
-        return issues
-
+        return ["[ERRORE] Il CSV e' vuoto o senza intestazione."]
     if headers[0] != "filename":
         issues.append(f'[ERRORE] Prima colonna deve essere "filename", trovato: "{headers[0]}"')
-
     for col in ("filename", "dc.title"):
         if col not in headers:
             issues.append(f'[ERRORE] Colonna obbligatoria mancante: "{col}"')
-
     for col in headers:
         if col == "filename":
             continue
         if not any(col.startswith(p) for p in DC_VALID_PREFIXES):
-            issues.append(f'[AVVISO] Colonna non-Dublin Core "{col}": non trasposta nel METS.')
+            issues.append(f'[AVVISO] Colonna non-Dublin Core "{col}".')
 
     rows = list(reader)
     if not rows:
@@ -644,32 +570,47 @@ def validate_metadata_csv(csv_path: Path) -> list[str]:
         if fn and FORBIDDEN_CHARS.search(fn):
             issues.append(f'[ERRORE] Riga {i}: filename contiene caratteri vietati: "{fn}"')
         if not title:
-            issues.append(f'[AVVISO] Riga {i}: dc.title è vuoto.')
+            issues.append(f'[AVVISO] Riga {i}: dc.title e\' vuoto.')
 
     return issues
 
 
 def report_csv_validation(csv_path: Path) -> bool:
-    """Esegue la validazione e stampa i risultati. Restituisce True se nessun errore bloccante."""
-    issues  = validate_metadata_csv(csv_path)
-    errors  = [i for i in issues if i.startswith("[ERRORE]")]
+    """Esegue la validazione e stampa i risultati."""
+    issues   = validate_metadata_csv(csv_path)
+    errors   = [i for i in issues if i.startswith("[ERRORE]")]
     warnings = [i for i in issues if i.startswith("[AVVISO]")]
 
     if not issues:
         print(f"  [validazione] metadata.csv OK — nessun problema rilevato.")
         return True
-
     for w in warnings:
         print(f"  {w}")
     for e in errors:
         print(f"  {e}")
-
     if errors:
-        print(f"  [validazione] {len(errors)} errore/i — metadata.csv potrebbe non essere letto da Archivematica.")
+        print(f"  [validazione] {len(errors)} errore/i.")
         return False
-
-    print(f"  [validazione] {len(warnings)} avviso/i — metadata.csv è accettabile.")
+    print(f"  [validazione] {len(warnings)} avviso/i — accettabile.")
     return True
+
+
+# ── Controllo dataset vuoto ───────────────────────────────────────────────────
+
+def _dataset_has_files(versions: list[dict]) -> tuple[bool, str]:
+    """
+    Controlla se almeno una versione del dataset contiene file scaricabili.
+    Restituisce (True, "") se ci sono file, oppure (False, motivo) se vuoto.
+    """
+    if not versions:
+        return False, "nessuna versione pubblica trovata"
+    for v in versions:
+        if v.get("files", []):
+            return True, ""
+    return False, (
+        f"{len(versions)} versione/i trovata/e ma nessun file presente "
+        f"(dataset vuoto o accesso ristretto)"
+    )
 
 
 # ── Elaborazione per versione ─────────────────────────────────────────────────
@@ -677,12 +618,7 @@ def report_csv_validation(csv_path: Path) -> bool:
 def process_version(doi: str, version: dict, doi_dir: Path,
                     meta_dir: Path) -> dict:
     """
-    Elabora una singola versione di un dataset:
-    - crea <doi_dir>/objects/<vtag>/objects/ per i file del dataset
-    - salva dataverse.json in <doi_dir>/objects/<vtag>/metadata/
-    - genera dcat.json localmente (se EXPORT_DCAT=true) in <doi_dir>/objects/<vtag>/metadata/
-    - scarica schema.json da API Dataverse (se EXPORT_DCAT=true) in <doi_dir>/objects/<vtag>/metadata/
-    - il metadata.csv di radice viene generato da process_doi dopo tutte le versioni
+    Elabora una singola versione di un dataset.
     """
     major     = version.get("versionNumber", 0)
     minor     = version.get("versionMinorNumber", 0)
@@ -691,49 +627,46 @@ def process_version(doi: str, version: dict, doi_dir: Path,
     ver_state = version.get("versionState", "")
 
     result = {
-        "version":    vtag,
-        "state":      ver_state,
-        "status":     "ok",
-        "files_ok":   0,
-        "files_err":  0,
-        "error":      None,
+        "version":   vtag,
+        "state":     ver_state,
+        "status":    "ok",
+        "files_ok":  0,
+        "files_err": 0,
+        "error":     None,
     }
 
     print(f"  ── Versione {vtag} [{ver_state}]")
 
-    # Struttura: objects/<vtag>/objects/ (file) e objects/<vtag>/metadata/ (JSON+CSV)
     data_dir     = doi_dir / "objects" / vtag / "objects"
     ver_meta_dir = doi_dir / "objects" / vtag / "metadata"
     data_dir.mkdir(parents=True, exist_ok=True)
     ver_meta_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── dataverse.json → objects/<vtag>/metadata/dataverse.json ──────────────
+    # ── dataverse.json ────────────────────────────────────────────────────────
     dv_path = ver_meta_dir / "dataverse.json"
     if not dv_path.exists():
         export   = get_version_export(doi, ver_str, exporter="dataverse_json")
         combined = {"version_metadata": version, "dataverse_export": export}
         with open(dv_path, "w", encoding="utf-8") as f:
             json.dump(combined, f, ensure_ascii=False, indent=2)
-        print(f"  [metadata] dataverse.json salvato")
+        print(f"    [metadata] dataverse.json salvato")
     else:
-        print(f"  [metadata] dataverse.json già presente, skip")
+        print(f"    [metadata] dataverse.json gia' presente, skip")
 
-    # ── dcat.json → objects/<vtag>/metadata/dcat.json ─────────────────────────
-    # Generato localmente dai metadati in memoria; ogni versione ha il suo DCAT.
+    # ── dcat.json (DCAT-AP generato localmente) ───────────────────────────────
     if EXPORT_DCAT:
         dcat_path = ver_meta_dir / "dcat.json"
         if not dcat_path.exists():
             try:
                 dcat_text = build_dcat_from_version(doi, version)
                 dcat_path.write_text(dcat_text, encoding="utf-8")
-                print(f"  [metadata] dcat.json generato")
+                print(f"    [metadata] dcat.json generato")
             except Exception as e:
-                print(f"  [ATTENZIONE] Generazione DCAT non riuscita: {e}")
+                print(f"    [ATTENZIONE] Generazione DCAT non riuscita: {e}")
         else:
-            print(f"  [metadata] dcat.json già presente, skip")
+            print(f"    [metadata] dcat.json gia' presente, skip")
 
-    # ── schema.json → objects/<vtag>/metadata/schema.json ────────────────────
-    # Schema.org JSON-LD scaricato dall'API Dataverse (exporter=schema.org).
+    # ── schema.json (Schema.org da API Dataverse) ─────────────────────────────
     if EXPORT_DCAT:
         schema_path = ver_meta_dir / "schema.json"
         if not schema_path.exists():
@@ -741,18 +674,18 @@ def process_version(doi: str, version: dict, doi_dir: Path,
             if schema_data:
                 with open(schema_path, "w", encoding="utf-8") as f:
                     json.dump(schema_data, f, ensure_ascii=False, indent=2)
-                print(f"  [metadata] schema.json salvato")
+                print(f"    [metadata] schema.json salvato")
             else:
-                print(f"  [metadata] schema.json non disponibile, skip")
+                print(f"    [metadata] schema.json non disponibile, skip")
         else:
-            print(f"  [metadata] schema.json già presente, skip")
+            print(f"    [metadata] schema.json gia' presente, skip")
 
     # ── File del dataset ──────────────────────────────────────────────────────
     files = version.get("files", [])
     if not files:
-        print(f"  [data] Nessun file in questa versione.")
+        print(f"    [data] Nessun file in questa versione.")
     else:
-        print(f"  [data] {len(files)} file trovati, inizio download...")
+        print(f"    [data] {len(files)} file trovati, inizio download...")
         for file_info in files:
             ok = download_file(file_info, data_dir)
             if ok:
@@ -763,12 +696,12 @@ def process_version(doi: str, version: dict, doi_dir: Path,
     if result["files_err"] > 0:
         result["status"] = "partial"
 
-    # ── metadata.csv per questa versione → objects/<vtag>/metadata/ ──────────
+    # ── metadata.csv per questa versione ─────────────────────────────────────
     ver_csv_path = ver_meta_dir / "metadata.csv"
     if not ver_csv_path.exists():
         _write_version_csv(version, data_dir, ver_meta_dir)
     else:
-        print(f"  [metadata] metadata.csv (versione) già presente, skip")
+        print(f"    [metadata] metadata.csv (versione) gia' presente, skip")
 
     return result
 
@@ -776,20 +709,18 @@ def process_version(doi: str, version: dict, doi_dir: Path,
 # ── Elaborazione per DOI ──────────────────────────────────────────────────────
 
 def process_doi(doi: str, output_root: Path) -> dict:
-    """
-    Elabora un singolo DOI scaricando tutte le versioni disponibili.
-    """
+    """Elabora un singolo DOI scaricando tutte le versioni disponibili."""
     result = {
-        "doi":      doi,
-        "status":   "ok",
-        "versions": [],
-        "error":    None,
+        "doi":          doi,
+        "status":       "ok",
+        "versions":     [],
+        "error":        None,
+        "empty_reason": None,
     }
 
     doi_dir = output_root / sanitize(doi)
-    doi_dir.mkdir(parents=True, exist_ok=True)
 
-    # Recupera tutte le versioni
+    # Recupera tutte le versioni PRIMA di creare la directory
     print(f"  → Recupero lista versioni...")
     try:
         versions = get_all_versions(doi)
@@ -807,10 +738,22 @@ def process_doi(doi: str, output_root: Path) -> dict:
 
     if not versions:
         print(f"  [INFO] Nessuna versione pubblica trovata.")
-        result["status"] = "empty"
+        result["status"]       = "empty"
+        result["empty_reason"] = "nessuna versione pubblica trovata"
         return result
 
-    # Ordina per versione crescente (dalla più vecchia alla più recente)
+    # Controlla se il dataset contiene file prima di creare la directory
+    has_files, empty_reason = _dataset_has_files(versions)
+    if not has_files:
+        print(f"  [INFO] Dataset vuoto: {empty_reason}")
+        print(f"  [INFO] Directory non creata.")
+        result["status"]       = "empty"
+        result["empty_reason"] = empty_reason
+        return result
+
+    # Dataset non vuoto: crea la directory e procedi
+    doi_dir.mkdir(parents=True, exist_ok=True)
+
     versions.sort(key=lambda v: (v.get("versionNumber", 0),
                                  v.get("versionMinorNumber", 0)))
 
@@ -819,7 +762,6 @@ def process_doi(doi: str, output_root: Path) -> dict:
                                   v.get("versionMinorNumber", 0))
                       for v in versions))
 
-    # Cartella metadata condivisa nella radice del DOI
     meta_dir = doi_dir / "metadata"
     meta_dir.mkdir(parents=True, exist_ok=True)
 
@@ -835,8 +777,7 @@ def process_doi(doi: str, output_root: Path) -> dict:
     if any_error and result["status"] == "ok":
         result["status"] = "partial"
 
-    # ── Genera metadata.csv unico per tutte le versioni ──────────────────────
-    # Rigenera sempre: una nuova versione potrebbe aver aggiunto file
+    # Genera metadata.csv unico per tutte le versioni (sempre rigenerato)
     write_archivematica_metadata(versions, doi_dir, meta_dir)
     csv_meta_path = meta_dir / "metadata.csv"
     valid = report_csv_validation(csv_meta_path)
@@ -857,8 +798,9 @@ def main():
         help=f"File con la lista dei DOI (default: {DOIS_FILE})"
     )
     parser.add_argument(
-        "--output", default=OUTPUT_DIR,
-        help=f"Cartella di destinazione (default: {OUTPUT_DIR})"
+        "--output", default=None,
+        help="Cartella di destinazione. Se omessa: variabile OUTPUT_DIR nel "
+             ".env, oppure 'DATASET_TRASFERITI' come fallback."
     )
     parser.add_argument(
         "--apikey", default="",
@@ -871,27 +813,25 @@ def main():
     )
     parser.add_argument(
         "--dcat", action="store_true",
-        help="Abilita l'esportazione DCAT-AP per ogni versione. "
-             "Equivalente a EXPORT_DCAT=true nel .env"
+        help="Abilita l'esportazione DCAT-AP (dcat.json) e Schema.org (schema.json) "
+             "per ogni versione. Equivalente a EXPORT_DCAT=true nel .env"
     )
     args = parser.parse_args()
 
-    # Risolvi e attiva la API key globalmente
     global _active_api_key, _ssl_verify, EXPORT_DCAT
     _active_api_key = resolve_api_key(args.apikey)
 
-    # Verifica SSL
     env_ssl = os.environ.get("SSL_VERIFY", "true").lower()
     if args.no_verify_ssl or env_ssl in ("false", "0", "no"):
         _ssl_verify = False
         print("[AVVISO] Verifica certificato SSL disabilitata.")
 
-    # Export DCAT (flag CLI prevale su .env)
     if args.dcat:
         EXPORT_DCAT = True
 
     dois        = load_dois(args.dois)
-    output_root = Path(args.output)
+    output_dir  = args.output or OUTPUT_DIR
+    output_root = Path(output_dir)
     output_root.mkdir(parents=True, exist_ok=True)
 
     key_display = ("*" * 6 + _active_api_key[-4:]) if len(_active_api_key) > 4 else \
@@ -907,6 +847,7 @@ def main():
     print(f"{'='*62}\n")
 
     summary = []
+
     for i, doi in enumerate(dois, 1):
         print(f"[{i}/{len(dois)}] DOI: {doi}")
         result = process_doi(doi, output_root)
@@ -920,6 +861,8 @@ def main():
             f"Versioni: {len(result['versions'])} | "
             f"File OK: {tot_ok} | Errori file: {tot_err}"
         )
+        if result.get("empty_reason"):
+            print(f"  Motivo: {result['empty_reason']}")
         if result["error"]:
             print(f"  Dettaglio errore: {result['error']}")
         print()
@@ -927,21 +870,51 @@ def main():
         if i < len(dois):
             time.sleep(PAUSE_BETWEEN_DOIS)
 
-    # Riepilogo JSON
+    # Riepilogo JSON completo
     summary_path = output_root / "riepilogo_download.json"
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
 
+    # Report DOI vuoti (aggiornamento incrementale)
+    empty_records = [
+        {
+            "doi":          r["doi"],
+            "empty_reason": r.get("empty_reason", ""),
+            "rilevato_il":  datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        for r in summary if r["status"] == "empty"
+    ]
+
+    empty_path = output_root / "doi_vuoti.json"
+    if empty_records:
+        existing: dict = {}
+        if empty_path.exists():
+            try:
+                for rec in json.loads(empty_path.read_text(encoding="utf-8")):
+                    existing[rec["doi"]] = rec
+            except Exception:
+                pass
+        for rec in empty_records:
+            existing[rec["doi"]] = rec
+        empty_path.write_text(
+            json.dumps(list(existing.values()), ensure_ascii=False, indent=2),
+            encoding="utf-8"
+        )
+
     ok      = sum(1 for r in summary if r["status"] == "ok")
     partial = sum(1 for r in summary if r["status"] == "partial")
     errors  = sum(1 for r in summary if r["status"] == "error")
+    empty   = sum(1 for r in summary if r["status"] == "empty")
 
     print(f"{'='*62}")
     print(f"  RIEPILOGO FINALE")
     print(f"  Completati  : {ok}")
     print(f"  Parziali    : {partial}")
     print(f"  Errori      : {errors}")
+    print(f"  Vuoti       : {empty}")
     print(f"  Riepilogo   : {summary_path}")
+    if empty_records:
+        print(f"  DOI vuoti   : {empty_path}")
     print(f"{'='*62}")
 
 
