@@ -17,6 +17,7 @@ data/
 output/
 *.csv
 *.zip
+*.log
 
 # File di sistema e editor
 .DS_Store
