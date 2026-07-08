@@ -26,6 +26,7 @@ Nota: script sviluppato con l'assistenza di Claude AI (Anthropic)
 """
 
 import argparse
+import datetime
 import json
 import os
 import re
@@ -69,6 +70,12 @@ SS_VERIFY = os.environ.get("SSL_VERIFY", "false").lower() == "true"
 # UUID della location AIP Storage di destinazione (dove gli AIP devono
 # risultare registrati). La trovi in Storage Service > Locations.
 TARGET_LOCATION_UUID = os.environ.get("TARGET_LOCATION_UUID", "")
+
+# UUID della pipeline (l'istanza Archivematica/Dashboard) a cui attribuire
+# gli AIP registrati. Obbligatorio: la Storage Service non accetta package
+# con origin_pipeline nullo. Lo trovi con GET /api/v2/pipeline/ oppure nel
+# Dashboard in Administration > General.
+PIPELINE_UUID = os.environ.get("PIPELINE_UUID", "")
 
 # Pattern per riconoscere un file AIP e estrarne l'UUID dal nome.
 # Default: <nome>-<uuid>.<estensione> es. mio-dataset-3fa85f64-5717-4562-b3fc-2c963f66afa6.7z
@@ -163,6 +170,108 @@ def _read_archive_entry(path, entry_name):
     return None
 
 
+# ---------------------------------------------------------------------------
+# Evento PREMIS di compressione (necessario per il pointer file)
+# ---------------------------------------------------------------------------
+# La Storage Service, per gli AIP COMPRESSI (file, non directory), esige un
+# pointer file. Se la POST non fornisce un evento PREMIS di tipo
+# "compression" nel campo "events", lo store fallisce con:
+#   "This AIP needs a pointer file, however the Archivematica pipeline did
+#    not create one and it also did not provide the compression event..."
+# L'evento deve avere un event_detail nel formato:
+#   program="7z"; algorithm="bzip2"; version="..."
+# (verificato sul sorgente della Storage Service e di premisrw, e coerente
+# con come lo costruisce compress_aip.py di Archivematica).
+
+PREMIS_3_0_META = {
+    "xsi:schema_location": "http://www.loc.gov/premis/v3 "
+                            "http://www.loc.gov/standards/premis/v3/premis.xsd",
+    "version": "3.0",
+}
+
+# Mappa dei metodi di compressione interni di 7z verso gli algoritmi
+# riconosciuti da Archivematica (7z-lzma, 7z-bzip2, 7z-copy)
+_7Z_METHOD_MAP = {
+    "lzma": "lzma",
+    "lzma2": "lzma",
+    "bzip2": "bzip2",
+    "copy": "copy",
+}
+
+
+def detect_compression(path):
+    """Deduce (program, algorithm) dal tipo di archivio, rispecchiando le
+    convenzioni degli eventi di compressione di Archivematica:
+      - 7z-lzma / 7z-bzip2 / 7z-copy (il metodo reale viene letto
+        dall'archivio con '7z l -slt', se disponibile)
+      - gzip (tar.gz), pbzip2 (tar.bz2): algorithm vuoto, come fa
+        compress_aip.py
+      - tar/zip puri: non sono formati di compressione nativi di
+        Archivematica, si registra il programma con algorithm vuoto
+        (best effort per AIP prodotti da strumenti terzi).
+    """
+    lower = path.lower()
+    if lower.endswith(".7z"):
+        algorithm = "lzma"  # default piu' comune in Archivematica
+        try:
+            result = subprocess.run(["7z", "l", "-slt", path],
+                                     capture_output=True, text=True, timeout=120)
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    if line.startswith("Method = "):
+                        method = line[len("Method = "):].split(":")[0].strip().lower()
+                        algorithm = _7Z_METHOD_MAP.get(method, algorithm)
+                        break
+        except FileNotFoundError:
+            pass  # 7z non installato: si usa il default
+        return "7z", algorithm
+    if lower.endswith((".tar.gz", ".tgz")):
+        return "gzip", ""
+    if lower.endswith((".tar.bz2", ".tbz2")):
+        return "pbzip2", ""
+    if lower.endswith(".tar"):
+        return "tar", ""
+    if lower.endswith(".zip"):
+        return "zip", ""
+    return "unknown", ""
+
+
+def build_compression_event(info):
+    """Costruisce l'evento PREMIS di compressione nel formato annidato che
+    la Storage Service deserializza con premisrw.PREMISEvent(data=...).
+    Stessa struttura prodotta da get_events_from_db() in store_aip.py di
+    Archivematica (round-trip JSON: le tuple diventano liste, ed e' ok).
+    """
+    program, algorithm = detect_compression(info["path"])
+    event_detail = (f'program="{program}"; algorithm="{algorithm}"; '
+                    f'version="sconosciuta (registrazione retrospettiva '
+                    f'di AIP preesistente)"')
+    return [
+        "event",
+        PREMIS_3_0_META,
+        [
+            "event_identifier",
+            ["event_identifier_type", "UUID"],
+            ["event_identifier_value", str(uuid_lib.uuid4())],
+        ],
+        ["event_type", "compression"],
+        ["event_date_time", datetime.datetime.now().isoformat()],
+        [
+            "event_detail_information",
+            ["event_detail", event_detail],
+        ],
+        [
+            "event_outcome_information",
+            ["event_outcome", ""],
+            ["event_outcome_detail", ["event_outcome_detail_note",
+                "Evento generato da bulk_register_aips.py per la "
+                "registrazione retrospettiva di un AIP preesistente; "
+                "descrive la compressione osservata, non l'operazione "
+                "originale."]],
+        ],
+    ]
+
+
 def get_mets_uuid(path):
     """Legge l'UUID autoritativo dal METS interno all'archivio, se possibile.
     Usata sia come fallback di identificazione (quando il filename non
@@ -206,34 +315,37 @@ def compute_quadrant_path(aip_uuid, filename):
     """Calcola il path standard 'a quadranti' (pairtree) usato da Archivematica
     per organizzare gli AIP dentro una location di tipo Local Filesystem:
 
-        <4hex>/<4hex>/<4hex>/<4hex>/<uuid-completo>/<filename>
+        <4hex>/<4hex>/<4hex>/<4hex>/<4hex>/<4hex>/<4hex>/<4hex>/<filename>
 
-    I quadranti sono i primi 16 caratteri esadecimali dell'UUID (senza
-    trattini), divisi in 4 blocchi da 4 caratteri. Essendo derivato solo
-    dall'UUID dell'AIP, questo path e' identico indipendentemente da quale
-    istanza Archivematica lo ha generato.
+    I quadranti sono TUTTI i 32 caratteri esadecimali dell'UUID (senza
+    trattini), divisi in 8 blocchi da 4 caratteri; il file sta direttamente
+    nell'ultimo quadrante, senza una cartella intermedia con l'UUID completo.
+    Schema verificato empiricamente sul current_path restituito da
+    GET /api/v2/file/<uuid>/ della Storage Service UNIMI (2026-07).
+    Essendo derivato solo dall'UUID dell'AIP, questo path e' identico
+    indipendentemente da quale istanza Archivematica lo ha generato.
     """
     hex_str = aip_uuid.replace("-", "")
-    quadrants = [hex_str[i:i + 4] for i in range(0, 16, 4)]
-    return "/".join(quadrants + [aip_uuid, filename])
+    quadrants = [hex_str[i:i + 4] for i in range(0, 32, 4)]
+    return "/".join(quadrants + [filename])
 
 
 def resolve_current_path(aip_uuid, info):
-    """Decide quale current_path usare per la registrazione:
+    """La Storage Service, durante lo store, PREPENDE SEMPRE da se' il path
+    a quadranti derivato dall'UUID al current_path fornito (verificato nel
+    sorgente: ``self.current_path = os.path.join(uuid_path, self.current_path)``
+    in package.py). Quindi nel payload va passato SOLO il nome del file.
 
-    - Se il rel_path trovato sul disco corrisponde gia' allo schema a
-      quadranti standard per questo UUID (es. AIP prodotto da un'altra
-      istanza Archivematica), lo riusa cosi' com'e': nessuno spostamento
-      necessario, la struttura e' gia' corretta.
-    - Altrimenti (es. AIP piatto prodotto da a3m, DART3 o simili) calcola
-      il path a quadranti atteso, cosi' la Storage Service lo sposta nella
-      posizione standard coerente con il resto della location.
+    Questa funzione calcola quindi:
+      - current_path da inviare: sempre e solo il filename;
+      - will_move (per il log): True se il file su disco NON e' gia' nel
+        percorso a quadranti che la SS calcolera' (in quel caso rsync fara'
+        uno spostamento fisico reale), False se e' gia' li' (move no-op).
     """
     expected = compute_quadrant_path(aip_uuid, info["filename"])
     found_normalized = info["rel_path"].replace(os.sep, "/")
-    if found_normalized == expected:
-        return info["rel_path"], False  # gia' a quadranti, nessun move reale
-    return expected, True  # verra' spostato dal path piatto/originale
+    will_move = found_normalized != expected
+    return info["filename"], will_move
 
 
 def _headers():
@@ -383,14 +495,11 @@ def find_orphan_aips(scan_dir, use_mets_fallback=True):
 def build_payload(aip_uuid, info, target_location_uri):
     """Costruisce il payload per la registrazione.
 
-    origin_path e' sempre la posizione REALE del file cosi' come trovato
-    sul disco (info["rel_path"]). current_path e' risolto da
-    resolve_current_path: se il file e' gia' organizzato secondo lo schema
-    a quadranti standard (tipico di un AIP prodotto da un'altra istanza
-    Archivematica) coincide con origin_path e non scatta nessuno
-    spostamento fisico; altrimenti (es. AIP piatto da a3m/DART3) e' il
-    path a quadranti calcolato, e la Storage Service sposta davvero il
-    file li' durante la registrazione.
+    origin_path e' la posizione REALE del file cosi' come trovato sul disco
+    (info["rel_path"], relativo alla location). current_path e' SOLO il nome
+    del file: la Storage Service prepende da se' il path a quadranti
+    derivato dall'UUID durante lo store. will_move (solo informativo) indica
+    se lo store comportera' uno spostamento fisico reale o un move no-op.
     """
     current_path, will_move = resolve_current_path(aip_uuid, info)
     payload = {
@@ -401,6 +510,11 @@ def build_payload(aip_uuid, info, target_location_uri):
         "current_path": current_path,
         "package_type": "AIP",
         "size": info["size"],
+        "origin_pipeline": f"/api/v2/pipeline/{PIPELINE_UUID}/",
+        # Evento PREMIS di compressione: obbligatorio per gli AIP compressi,
+        # senza il quale la Storage Service non puo' creare il pointer file
+        # e rifiuta lo store con HTTP 500.
+        "events": [build_compression_event(info)],
     }
     return payload, will_move
 
@@ -413,7 +527,9 @@ def register_aip(aip_uuid, info, target_location_uri, dry_run=True):
     if dry_run:
         print(f"[DRY-RUN] Registrerei {aip_uuid} ({info['rel_path']}, "
               f"{info['size']} bytes) [{move_note}] [{source_note}]")
-        print(f"           current_path -> {payload['current_path']}")
+        print(f"           current_path inviato -> {payload['current_path']}")
+        print(f"           path finale (calcolato dalla SS) -> "
+              f"{compute_quadrant_path(aip_uuid, info['filename'])}")
         return {"dry_run": True, "will_move": will_move, "uuid_source": info.get("uuid_source"),
                 "payload": payload}
 
@@ -475,6 +591,12 @@ def main():
 
     if not args.target_location_uuid:
         sys.exit("Errore: manca --target-location-uuid (o TARGET_LOCATION_UUID in .env)")
+
+    if not PIPELINE_UUID:
+        sys.exit("Errore: manca PIPELINE_UUID in .env (obbligatorio: la Storage "
+                 "Service non accetta package senza origin_pipeline). "
+                 "Lo trovi con GET /api/v2/pipeline/ o nel Dashboard in "
+                 "Administration > General.")
 
     if not SS_API_KEY:
         sys.exit("Errore: manca SS_API_KEY in .env")

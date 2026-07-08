@@ -1,0 +1,25 @@
+{
+  "scan_dir": "/var/archivematica/test_bulk_register/test2_ereditati",
+  "dry_run": false,
+  "results": {
+    "c6e99189-f792-4a15-aec9-53c283c67552": {
+      "success": true,
+      "status_code": 201,
+      "will_move": false,
+      "uuid_source": "filename"
+    },
+    "00bb093b-7bac-497a-a400-6fb4592420e1": {
+      "success": true,
+      "status_code": 201,
+      "will_move": false,
+      "uuid_source": "filename"
+    },
+    "2c6e9266-c6fb-40cc-841f-7a2dfd98030f": {
+      "success": true,
+      "status_code": 201,
+      "will_move": false,
+      "uuid_source": "filename"
+    }
+  },
+  "conflicts": {}
+}
