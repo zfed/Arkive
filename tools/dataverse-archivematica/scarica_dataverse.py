@@ -50,6 +50,7 @@ Uso:
 
 import argparse
 import csv
+import logging
 import json
 import os
 import re
@@ -84,6 +85,56 @@ def _load_dotenv(env_file: str = ".env") -> None:
 
 
 _load_dotenv()
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+
+LOG_DIR = os.environ.get("LOG_DIR", "logs")
+
+
+def setup_logging(script_name: str = "scarica_dataverse") -> logging.Logger:
+    """
+    Configura il logging su file e su console contemporaneamente.
+    Il file di log viene creato in LOG_DIR con nome:
+      <script_name>_<YYYYMMDD>_<HHMMSS>.log
+    LOG_DIR e' configurabile nel .env (default: logs/).
+    """
+    log_dir = Path(LOG_DIR)
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp  = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file   = log_dir / f"{script_name}_{timestamp}.log"
+
+    logger = logging.getLogger(script_name)
+    logger.setLevel(logging.DEBUG)
+    logger.handlers.clear()
+
+    # Handler file (tutti i livelli, con timestamp)
+    fh = logging.FileHandler(log_file, encoding="utf-8")
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(logging.Formatter("%(asctime)s  %(message)s",
+                                       datefmt="%Y-%m-%d %H:%M:%S"))
+
+    # Handler console (stesso output di print, senza timestamp)
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setLevel(logging.DEBUG)
+    ch.setFormatter(logging.Formatter("%(message)s"))
+
+    logger.addHandler(fh)
+    logger.addHandler(ch)
+
+    # Reindirizza print() al logger in modo trasparente
+    import builtins
+    _original_print = builtins.print
+    def _logging_print(*args, **kwargs):
+        sep  = kwargs.get("sep", " ")
+        text = sep.join(str(a) for a in args)
+        # end/flush ignorati: il logger gestisce tutto
+        logger.info(text)
+    builtins.print = _logging_print
+
+    logger.info(f"Log salvato in: {log_file}")
+    return logger
+
 
 # ── Configurazione ────────────────────────────────────────────────────────────
 
@@ -817,6 +868,8 @@ def main():
              "per ogni versione. Equivalente a EXPORT_DCAT=true nel .env"
     )
     args = parser.parse_args()
+
+    setup_logging()
 
     global _active_api_key, _ssl_verify, EXPORT_DCAT
     _active_api_key = resolve_api_key(args.apikey)

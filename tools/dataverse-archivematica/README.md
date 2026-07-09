@@ -46,6 +46,8 @@ AM_PROCESSING_CONFIG=dataverse_001
 AM_AUTO_APPROVE=true
 
 SSL_VERIFY=false            # false per certificati self-signed
+
+LOG_DIR=logs                # cartella dove salvare i log di esecuzione
 ```
 
 ## Utilizzo
@@ -89,6 +91,7 @@ python3 archivematica_ingest.py
 | `riepilogo_download.json` | `scarica_dataverse.py` | Riepilogo completo di ogni DOI |
 | `doi_vuoti.json` | `scarica_dataverse.py` | DOI senza file (aggiornato incrementalmente) |
 | `stato_archivematica.json` | `archivematica_ingest.py` | Stato di ogni transfer/ingest |
+| `logs/<script>_<timestamp>.log` | entrambi | Log completo di ogni esecuzione |
 
 ## Documentazione
 
@@ -102,6 +105,8 @@ Vedi `manuale_dataverse_archivematica.pdf` per il manuale completo.
   dopo l'avvio degli script
 - Gli script sono idempotenti: possono essere rieseguiti senza duplicare operazioni
   gia' completate
+- Ogni esecuzione crea automaticamente un file di log in `logs/` con timestamp,
+  contenente l'intero output a schermo
 
 ## Autori
 
