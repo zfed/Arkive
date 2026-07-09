@@ -30,3 +30,4 @@ tools/dataverse-archivematica/stato_archivematica.json
 tools/dataverse-archivematica/riepilogo_download.json
 tools/dataverse-archivematica/DATASET_TRASFERITI/
 *:Zone.Identifier
+logs/
