@@ -186,12 +186,30 @@ PROCESSING_CONFIGS_DIR = (
     "processingMCPConfigs"
 )
 
+# Copia locale versionata del processing config XML (RACCOMANDATO).
+# Se impostato (via --processing-mcp-path o AM_PROCESSING_MCP_PATH nel .env),
+# lo script usa questo file e NON dipende più dalla shared directory di
+# Archivematica, i cui permessi possono cambiare con update/riavvii.
+# Esempio: /home/zfed/arkive/config/dataverse_001ProcessingMCP.xml
+PROCESSING_MCP_PATH = ""
+
 POLL_INTERVAL        = 15    # secondi tra un polling e l'altro
 UNIT_NOT_FOUND_WAIT    = 20   # secondi di attesa se l'unità non è ancora registrata
 UNIT_NOT_FOUND_RETRIES = 2    # numero di tentativi extra in caso di unità non trovata
 APPROVE_TRANSFER_WAIT  = 10   # secondi di attesa prima di tentare l'approve automatico
 POLL_MAX_WAIT        = 7200  # secondi massimi di attesa (2 ore)
-REQUEST_TIMEOUT      = 30
+
+# Timeout delle chiamate API (secondi). Configurabile con AM_API_TIMEOUT nel
+# .env o con --api-timeout da CLI. Il default è generoso: sotto carico
+# (molti ingest in coda) o con dataset molto grandi, Archivematica può
+# impiegare più di 30s a rispondere anche a chiamate semplici.
+REQUEST_TIMEOUT      = int(os.environ.get("AM_API_TIMEOUT", "120"))
+
+# Errori di rete transitori (ReadTimeout, ConnectionError): un timeout NON
+# significa che l'operazione sia fallita lato Archivematica — significa solo
+# che la risposta non è arrivata in tempo. Le GET vengono ritentate.
+TRANSIENT_RETRIES    = 3     # tentativi totali per le GET
+TRANSIENT_RETRY_WAIT = 15    # secondi di attesa tra i tentativi
 
 # ── Utility ───────────────────────────────────────────────────────────────────
 
@@ -224,8 +242,33 @@ def ss_headers(api_key: str, user: str) -> dict:
 
 
 def get_json(url: str, headers: dict) -> dict:
-    r = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT,
-                     verify=_ssl_verify)
+    """
+    GET con retry automatico sugli errori di rete transitori
+    (ReadTimeout, ConnectionError): sotto carico Archivematica può
+    rispondere lentamente, ma un timeout di lettura NON significa che
+    l'unità interrogata sia fallita. Prima di rinunciare, lo script
+    ritenta TRANSIENT_RETRIES volte con TRANSIENT_RETRY_WAIT s di pausa.
+    """
+    last_err: Exception | None = None
+    for attempt in range(1, TRANSIENT_RETRIES + 1):
+        try:
+            r = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT,
+                             verify=_ssl_verify)
+            break
+        except (requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError) as e:
+            last_err = e
+            if attempt < TRANSIENT_RETRIES:
+                print(f"    [retry] Errore di rete transitorio ({e}) — "
+                      f"tentativo {attempt + 1}/{TRANSIENT_RETRIES} "
+                      f"tra {TRANSIENT_RETRY_WAIT}s ...")
+                time.sleep(TRANSIENT_RETRY_WAIT)
+    else:
+        raise RuntimeError(
+            f"Errore di rete persistente dopo {TRANSIENT_RETRIES} tentativi "
+            f"su {url}: {last_err}"
+        ) from last_err
+
     if not r.ok:
         try:
             body = r.json()
@@ -270,51 +313,146 @@ def list_processing_configs() -> list[str]:
         return None
 
 
-def apply_processing_config(doi_path: Path, processing_config: str) -> bool:
+def resolve_processing_mcp_source(processing_mcp_path: str,
+                                  processing_config: str) -> Path:
     """
-    Copia il file <processing_config>.xml da PROCESSING_CONFIGS_DIR nella
-    radice del pacchetto come "processingMCP.xml".
+    Determina il file XML sorgente della processing configuration.
+
+    Ordine di risoluzione:
+      1. Copia locale versionata (--processing-mcp-path / AM_PROCESSING_MCP_PATH)
+         — RACCOMANDATO: nessuna dipendenza dalla shared directory di
+         Archivematica, i cui permessi possono cambiare con update/riavvii.
+      2. Fallback legacy: <PROCESSING_CONFIGS_DIR>/<nome>ProcessingMCP.xml
+
+    Restituisce il Path del sorgente (senza verificarne la leggibilità:
+    la verifica fail-fast è in check_processing_mcp_source()).
+    """
+    if processing_mcp_path:
+        return Path(processing_mcp_path)
+    return Path(PROCESSING_CONFIGS_DIR) / f"{processing_config}ProcessingMCP.xml"
+
+
+def check_processing_mcp_source(src_xml: Path, ignore_missing: bool) -> bool:
+    """
+    Verifica FAIL-FAST (all'avvio, prima di elaborare qualunque pacchetto)
+    che il processing config XML sorgente esista e sia leggibile.
+
+    Un pacchetto trasferito senza processingMCP.xml viene processato con la
+    configurazione di default di Archivematica (es. con scansione virus),
+    e il problema emerge solo a ingest avviato — molto più costoso da
+    diagnosticare. Meglio fermarsi subito.
+
+    Restituisce True se il file è utilizzabile, False se manca ma l'utente
+    ha esplicitamente scelto di proseguire (--ignore-missing-processing-config).
+    In tutti gli altri casi termina lo script con exit code 1.
+    """
+    problema = None
+    try:
+        if not src_xml.is_file():
+            problema = "file non trovato"
+        elif not os.access(src_xml, os.R_OK):
+            problema = "Permission denied"
+    except PermissionError:
+        problema = "Permission denied su una directory del percorso"
+
+    if problema is None:
+        return True
+
+    if ignore_missing:
+        print(
+            f"[AVVISO] Processing config non utilizzabile: {src_xml} ({problema}).\n"
+            f"         Si prosegue SENZA processingMCP.xml come richiesto "
+            f"(--ignore-missing-processing-config): i transfer useranno la\n"
+            f"         configurazione di DEFAULT di Archivematica."
+        )
+        return False
+
+    print(
+        f"[ERRORE] Impossibile leggere il processing config: {src_xml} ({problema}).\n"
+        f"         Interrompo PRIMA di avviare qualunque transfer: senza\n"
+        f"         processingMCP.xml i pacchetti verrebbero processati con la\n"
+        f"         configurazione di default di Archivematica.\n"
+        f"\n"
+        f"Soluzioni:\n"
+        f"  1. (RACCOMANDATO) Usa una copia locale versionata del file:\n"
+        f"       mkdir -p ~/arkive/config\n"
+        f"       sudo cp {PROCESSING_CONFIGS_DIR}/<nome>ProcessingMCP.xml ~/arkive/config/\n"
+        f"       sudo chown $(whoami): ~/arkive/config/<nome>ProcessingMCP.xml\n"
+        f"     e impostala con --processing-mcp-path oppure nel .env:\n"
+        f"       AM_PROCESSING_MCP_PATH=/home/<utente>/arkive/config/<nome>ProcessingMCP.xml\n"
+        f"  2. Sistema i permessi sulla shared directory di Archivematica\n"
+        f"     (fragile: possono cambiare a ogni update/riavvio).\n"
+        f"  3. Prosegui consapevolmente senza processing config:\n"
+        f"       --ignore-missing-processing-config  (SCONSIGLIATO)"
+    )
+    sys.exit(1)
+
+
+def apply_processing_config(doi_path: Path, src_xml: Path,
+                            retries: int = 3, retry_wait: int = 2) -> None:
+    """
+    Copia il processing config XML sorgente nella radice del pacchetto
+    come "processingMCP.xml", e VERIFICA che la copia sia avvenuta.
 
     Questo è il meccanismo con cui Archivematica applica una processing
     configuration ai transfer avviati tramite /api/transfer/start_transfer/,
     che NON supporta il parametro "processing_config" nel payload.
 
-    Restituisce True se il file è stato copiato, False se la configurazione
-    non è stata trovata (in tal caso si procede con il default di Archivematica).
+    Robustezze per Transfer Source su mount Windows/Dropbox (WSL drvfs):
+      - se la destinazione esiste già e non è scrivibile (attributo
+        read-only, copia manuale precedente con sudo), viene resa
+        scrivibile e rimossa prima della copia;
+      - in caso di PermissionError/OSError (es. lock transitorio del
+        client Dropbox durante la sincronizzazione) la copia viene
+        ritentata fino a `retries` volte con `retry_wait` secondi di pausa.
+
+    Solleva RuntimeError se tutti i tentativi falliscono: il pacchetto
+    viene marcato "failed" nel file di stato e NESSUN transfer viene
+    avviato (mai più pacchetti silenziosamente non conformi).
     """
-    src_xml = Path(PROCESSING_CONFIGS_DIR) / f"{processing_config}ProcessingMCP.xml"
-    try:
-        exists = src_xml.exists()
-    except PermissionError:
-        cmd = (f"sudo cp {PROCESSING_CONFIGS_DIR}/"
-               f"{processing_config}ProcessingMCP.xml "
-               f"{doi_path}/processingMCP.xml")
-        print(
-            f"    [AVVISO] Impossibile accedere a {PROCESSING_CONFIGS_DIR} "
-            f"(Permission denied). processingMCP.xml non verra copiato. "
-            f"Per applicare la config manualmente:\n      {cmd}"
-        )
-        return False
+    dst_xml = doi_path / "processingMCP.xml"
+    last_err: Exception | None = None
 
-    if not exists:
-        print(
-            f"    [AVVISO] Processing config '{src_xml.name}' non trovata "
-            f"in {PROCESSING_CONFIGS_DIR}. Verrà usata la configurazione di default "
-            f"di Archivematica."
-        )
-        return False
+    for attempt in range(1, retries + 1):
+        try:
+            # Rimuovi un'eventuale destinazione preesistente non scrivibile
+            if dst_xml.exists():
+                try:
+                    os.chmod(dst_xml, 0o644)
+                except OSError:
+                    pass  # best-effort: su drvfs può non essere supportato
+                try:
+                    dst_xml.unlink()
+                except OSError:
+                    pass  # se la unlink fallisce, ci prova comunque copyfile
+            shutil.copyfile(src_xml, dst_xml)
+            last_err = None
+            break
+        except (PermissionError, OSError) as e:
+            last_err = e
+            if attempt < retries:
+                print(
+                    f"    [retry] Copia processingMCP.xml fallita ({e}) — "
+                    f"tentativo {attempt + 1}/{retries} tra {retry_wait}s "
+                    f"(possibile lock transitorio, es. sync Dropbox) ..."
+                )
+                time.sleep(retry_wait)
 
-    try:
-        dst_xml = doi_path / "processingMCP.xml"
-        shutil.copyfile(src_xml, dst_xml)
-        print(f"    [debug] processingMCP.xml ('{processing_config}') copiato in {dst_xml}")
-        return True
-    except PermissionError:
-        print(
-            f"    [AVVISO] Impossibile leggere {src_xml} (Permission denied). "
-            f"processingMCP.xml non verrà copiato."
+    if last_err is not None:
+        raise RuntimeError(
+            f"Copia di {src_xml} in {dst_xml} fallita dopo {retries} tentativi: "
+            f"{last_err}. Transfer NON avviato per questo pacchetto. "
+            f"Verifica permessi/attributi della destinazione "
+            f"(ls -l {dst_xml}) ed eventuali lock del client di sincronizzazione."
+        ) from last_err
+
+    # Verifica post-copia: il file deve esistere davvero nella radice
+    if not dst_xml.is_file() or dst_xml.stat().st_size == 0:
+        raise RuntimeError(
+            f"Verifica post-copia fallita: {dst_xml} assente o vuoto. "
+            f"Transfer NON avviato per questo pacchetto."
         )
-        return False
+    print(f"    [debug] processingMCP.xml copiato e verificato in {dst_xml}")
 
 
 def processing_config_exists(am_url: str, am_user: str, am_key: str,
@@ -405,8 +543,34 @@ def start_transfer(
         "row_ids[]": "",
     }
     h = am_headers(am_key, am_user)
-    r = requests.post(url, headers=h, data=payload, timeout=REQUEST_TIMEOUT,
-                      verify=_ssl_verify)
+    try:
+        r = requests.post(url, headers=h, data=payload,
+                          timeout=REQUEST_TIMEOUT, verify=_ssl_verify)
+    except (requests.exceptions.Timeout,
+            requests.exceptions.ConnectionError) as e:
+        # ATTENZIONE: il timeout della RISPOSTA non implica che la RICHIESTA
+        # non sia arrivata. Con dataset grandi la copia nella watched
+        # directory può superare il timeout: il transfer parte lato
+        # Archivematica mentre lo script non riceve risposta. Dichiarare
+        # subito "failed" produrrebbe un transfer zombie in Dashboard e un
+        # futuro DUPLICATO al retry. Prima di rinunciare, cerchiamo il
+        # transfer per nome tra quelli in attesa di approvazione.
+        print(f"    [AVVISO] start_transfer in timeout ({e}) — la richiesta "
+              f"potrebbe comunque essere arrivata: cerco il transfer "
+              f"'{transfer_name}' tra quelli in attesa ...")
+        uuid = find_transfer_uuid_by_name(am_url, am_user, am_key,
+                                          transfer_name)
+        if uuid:
+            print(f"    [riaggancio] Transfer trovato in Archivematica "
+                  f"(UUID: {uuid}) — proseguo normalmente.")
+            return uuid
+        raise RuntimeError(
+            f"start_transfer in timeout e transfer '{transfer_name}' non "
+            f"trovato tra quelli in attesa. Se in Dashboard compare un "
+            f"transfer con questo nome, approvarlo/gestirlo manualmente e "
+            f"riconciliare con riconcilia_stato.py; altrimenti rilanciare "
+            f"lo script."
+        ) from e
 
     if not r.ok:
         try:
@@ -444,6 +608,46 @@ def start_transfer(
 
 
 # ── Polling Transfer ──────────────────────────────────────────────────────────
+
+def find_transfer_uuid_by_name(am_url: str, am_user: str, am_key: str,
+                               transfer_name: str,
+                               tries: int = 4, wait: int = 15) -> str | None:
+    """
+    Cerca un transfer per nome tra quelli in attesa di approvazione
+    (/api/transfer/unapproved/) e ne estrae l'UUID dal nome della
+    directory (Archivematica appende -<uuid> al nome del pacchetto
+    nella watched directory).
+
+    Usato per RIAGGANCIARE un transfer quando start_transfer va in
+    timeout ma la richiesta è comunque arrivata ad Archivematica.
+    Restituisce l'UUID se trovato, None altrimenti.
+    """
+    import re
+    uuid_pattern = re.compile(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+        re.IGNORECASE,
+    )
+    h = am_headers(am_key, am_user)
+    for attempt in range(1, tries + 1):
+        print(f"    [riaggancio] Attendo {wait}s prima della ricerca "
+              f"(tentativo {attempt}/{tries}) ...")
+        time.sleep(wait)
+        try:
+            r = requests.get(f"{am_url}/api/transfer/unapproved/",
+                             headers=h, timeout=REQUEST_TIMEOUT,
+                             verify=_ssl_verify)
+            if not r.ok:
+                continue
+            for t in r.json().get("results", []):
+                directory = t.get("directory", "")
+                if transfer_name in directory:
+                    found = uuid_pattern.findall(directory)
+                    if found:
+                        return found[-1]
+        except requests.exceptions.RequestException:
+            continue
+    return None
+
 
 def _is_unit_not_found_yet(exc: Exception) -> bool:
     """
@@ -734,6 +938,10 @@ def process_doi_package(
     # ── Skip se già completato ────────────────────────────────────────────────
     if record.get("status") == "ingested":
         print(f"  [SKIP] {state_key} — già ingestato (AIP: {record.get('aip_uuid')})")
+        # Marcatore effimero per il conteggio nel riepilogo ("Già presenti"):
+        # senza, gli skip verrebbero contati come "Completati". Viene rimosso
+        # dal chiamante prima del salvataggio dello stato.
+        record["_skipped"] = True
         return record
 
     print(f"  → Elaborazione: {state_key}")
@@ -759,8 +967,11 @@ def process_doi_package(
 
         if not record.get("transfer_uuid"):
             # Applica la processing configuration scelta copiando
-            # processingMCP.xml nella radice del pacchetto
-            apply_processing_config(doi_path, args.processing_config)
+            # processingMCP.xml nella radice del pacchetto.
+            # Se la sorgente non è utilizzabile e l'utente ha scelto
+            # --ignore-missing-processing-config, si procede senza (default AM).
+            if args.processing_mcp_source is not None:
+                apply_processing_config(doi_path, args.processing_mcp_source)
 
             print(f"    Avvio transfer '{transfer_name}' ...")
             transfer_uuid = start_transfer(
@@ -828,6 +1039,8 @@ def process_doi_package(
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    global REQUEST_TIMEOUT  # override-abile da --api-timeout
+
     parser = argparse.ArgumentParser(
         description="Transfer e ingest in Archivematica dei dataset in DATASET_TRASFERITI"
     )
@@ -870,6 +1083,15 @@ def main():
         help=f"Nome della processing configuration / profilo di processing "
              f"(default: {PROCESSING_CONFIG}). Usa --list-processing-configs "
              f"per vedere quelli disponibili.")
+    parser.add_argument("--processing-mcp-path", default="",
+        help="Percorso di una copia locale versionata del processing config XML "
+             "(RACCOMANDATO, o variabile AM_PROCESSING_MCP_PATH nel .env). "
+             "Se impostato, ha priorità sulla shared directory di Archivematica "
+             "e --processing-config viene usato solo per la verifica via API.")
+    parser.add_argument("--ignore-missing-processing-config", action="store_true",
+        help="Prosegue anche se il processing config XML non è leggibile: "
+             "i transfer useranno la configurazione di DEFAULT di Archivematica "
+             "(SCONSIGLIATO — es. scansione virus attiva).")
 
     # Utility
     parser.add_argument("--no-verify-ssl",   action="store_true",
@@ -888,6 +1110,11 @@ def main():
              "al filesystem del server Archivematica) ed esce")
     parser.add_argument("--poll-interval", type=int, default=POLL_INTERVAL,
         help=f"Secondi tra un polling e l'altro (default: {POLL_INTERVAL})")
+    parser.add_argument("--api-timeout", type=int, default=0,
+        help=f"Timeout in secondi per le chiamate API (default: "
+             f"{REQUEST_TIMEOUT}, configurabile con AM_API_TIMEOUT nel .env). "
+             f"Con dataset grandi o Archivematica sotto carico servono "
+             f"valori generosi.")
     parser.add_argument("--dry-run",       action="store_true",
         help="Mostra cosa verrebbe fatto senza eseguire nulla")
 
@@ -929,6 +1156,14 @@ def main():
         args.transfer_type = os.environ.get("AM_TRANSFER_TYPE", TRANSFER_TYPE)
     if args.processing_config == PROCESSING_CONFIG:
         args.processing_config = os.environ.get("AM_PROCESSING_CONFIG", PROCESSING_CONFIG)
+    if not args.processing_mcp_path:
+        args.processing_mcp_path = os.environ.get(
+            "AM_PROCESSING_MCP_PATH", PROCESSING_MCP_PATH
+        )
+    if args.api_timeout > 0:
+        # Override da CLI del timeout API (variabile di modulo usata da
+        # tutte le chiamate requests; global dichiarato a inizio main)
+        REQUEST_TIMEOUT = args.api_timeout
 
     # ── Modalità --list-processing-configs ────────────────────────────────────
     if args.list_processing_configs:
@@ -1035,6 +1270,19 @@ def main():
             f"Si procede comunque."
         )
 
+    # ── Fail-fast sul processing config XML ───────────────────────────────────
+    # Verifica PRIMA di elaborare qualunque pacchetto che il file sorgente
+    # di processingMCP.xml sia leggibile. Se non lo è, lo script termina
+    # (salvo --ignore-missing-processing-config): mai più pacchetti
+    # silenziosamente trasferiti con la configurazione di default.
+    src_xml = resolve_processing_mcp_source(
+        args.processing_mcp_path, args.processing_config
+    )
+    if check_processing_mcp_source(src_xml, args.ignore_missing_processing_config):
+        args.processing_mcp_source = src_xml
+    else:
+        args.processing_mcp_source = None  # scelta esplicita dell'utente
+
     def mask(k):
         return ("*" * 6 + k[-4:]) if len(k) > 4 else ("(non impostata)" if not k else "****")
 
@@ -1047,6 +1295,7 @@ def main():
     print(f"  Transfer Src  : {args.transfer_source}")
     print(f"  Transfer type : {args.transfer_type}")
     print(f"  Processing cfg: {args.processing_config}")
+    print(f"  MCP XML       : {args.processing_mcp_source or '(NESSUNO — default Archivematica)'}")
     print(f"  Auto-approve  : {args.auto_approve}")
     print(f"  File di stato : {args.state_file}")
     print(f"  SSL verify    : {_ssl_verify}")
@@ -1077,7 +1326,10 @@ def main():
         state[state_key] = record
         save_state(state, args.state_file)
 
-        if record["status"] == "ingested":
+        if record.get("_skipped"):
+            stats["skip"] += 1
+            record.pop("_skipped", None)
+        elif record["status"] == "ingested":
             stats["ok"] += 1
         elif record["status"] == "failed":
             stats["failed"] += 1
