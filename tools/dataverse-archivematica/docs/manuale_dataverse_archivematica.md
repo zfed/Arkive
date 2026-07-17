@@ -8,6 +8,7 @@ trasferimento di dataset da **Dataverse UNIMI** (`dataverse.unimi.it`) ad
 |---|---|
 | `scarica_dataverse.py` | Scarica dataset e metadati da Dataverse e li organizza in pacchetti compatibili con Archivematica |
 | `archivematica_ingest.py` | Trasferisce ed esegue l'ingest dei pacchetti in Archivematica, con approvazione automatica del transfer |
+| `riconcilia_stato.py` | Riconcilia i pacchetti "failed" del file di stato con gli AIP realmente presenti nello Storage Service (es. dopo approvazioni manuali) |
 
 ---
 
@@ -34,6 +35,7 @@ trasferimento di dataset da **Dataverse UNIMI** (`dataverse.unimi.it`) ad
                           - genera metadati DC                   |
                           - genera dcat.json (opt.)              v
                           - scarica schema.json (opt.) archivematica_ingest.py
+                                                      - verifica processing config (fail-fast)
                                                       - copia processingMCP.xml
                                                       - avvia transfer
                                                       - auto-approva transfer
@@ -130,7 +132,19 @@ SS_API_KEY=
 AM_TRANSFER_SOURCE_UUID=
 AM_TRANSFER_TYPE=standard
 AM_PROCESSING_CONFIG=dataverse_001
+
+# Copia locale VERSIONATA del processing config XML (RACCOMANDATO).
+# Elimina la dipendenza dalla shared directory di Archivematica
+# (/var/archivematica/...), i cui permessi possono cambiare con
+# update/riavvii. Setup: vedi sezione 5.
+AM_PROCESSING_MCP_PATH=/home/zfed/arkive/config/dataverse_001ProcessingMCP.xml
+
 AM_AUTO_APPROVE=true
+
+# Timeout API in secondi (default: 120). Con dataset grandi o
+# Archivematica sotto carico servono valori generosi; gli errori
+# di rete transitori vengono comunque ritentati.
+AM_API_TIMEOUT=120
 
 # ── SSL ───────────────────────────────────────────────────────
 SSL_VERIFY=false
@@ -322,9 +336,20 @@ python3 scarica_dataverse.py --no-verify-ssl
 
 ### Cosa fa
 
-Per ogni pacchetto DOI nella Transfer Source Location non ancora completato:
+All'avvio, PRIMA di elaborare qualunque pacchetto, lo script verifica
+(**fail-fast**) che il file XML della processing configuration sia
+leggibile. Se non lo e', si interrompe con exit code 1: senza
+`processingMCP.xml` i pacchetti verrebbero processati con la
+configurazione di **default** di Archivematica (es. con scansione virus
+attiva), e il problema emergerebbe solo a ingest avviato — molto piu'
+costoso da diagnosticare.
 
-1. Copia `processingMCP.xml` nella radice del pacchetto
+Poi, per ogni pacchetto DOI nella Transfer Source Location non ancora
+completato:
+
+1. Copia `processingMCP.xml` nella radice del pacchetto e **verifica**
+   che la copia sia avvenuta (in caso contrario il pacchetto viene
+   marcato `failed` e il transfer NON parte)
 2. Avvia il **Transfer** con nome `AIP-<YYYYMMDD>-<DOI>`
 3. Approva automaticamente il transfer tramite API (`/api/transfer/unapproved/`
    + `/api/transfer/approve/`)
@@ -334,6 +359,66 @@ Per ogni pacchetto DOI nella Transfer Source Location non ancora completato:
 
 Ogni cartella DOI viene trasferita come **un unico pacchetto** con tutte
 le sue versioni.
+
+### Gestione di timeout ed errori di rete transitori
+
+Un timeout di lettura NON significa che l'operazione sia fallita lato
+Archivematica — significa solo che la risposta non e' arrivata in tempo.
+Per questo:
+
+- Le chiamate di **polling** e le altre GET vengono ritentate
+  automaticamente (3 tentativi, 15s di pausa) in caso di
+  `Read timed out` o errore di connessione.
+- Se **`start_transfer` va in timeout**, la richiesta potrebbe comunque
+  essere arrivata: con dataset grandi la copia nella watched directory
+  puo' superare il timeout. Lo script cerca allora il transfer per nome
+  tra quelli in attesa di approvazione e, se lo trova, si **RIAGGANCIA**
+  e prosegue normalmente. Solo se il transfer non esiste davvero il
+  pacchetto viene marcato `failed`. Questo evita transfer zombie in
+  Dashboard e AIP duplicati al retry.
+- Il timeout e' configurabile con `AM_API_TIMEOUT` nel `.env` o
+  `--api-timeout` da CLI (default: 120s).
+
+Se nonostante tutto un transfer viene completato manualmente dalla
+Dashboard dopo che lo script lo ha dichiarato `failed`, usare
+`riconcilia_stato.py` (vedi sezione 7) per allineare il file di stato
+PRIMA del lancio successivo, altrimenti il pacchetto verrebbe
+riprocessato da zero creando un AIP duplicato.
+
+### Sorgente del processing config: copia locale versionata (RACCOMANDATO)
+
+Il file XML puo' essere letto da due sorgenti, in ordine di priorita':
+
+1. **Copia locale versionata** — `--processing-mcp-path` o
+   `AM_PROCESSING_MCP_PATH` nel `.env`. Nessuna dipendenza dalla shared
+   directory di Archivematica, i cui permessi possono cambiare con
+   update, riavvii dei servizi o salvataggi della configurazione dal
+   Dashboard. La copia puo' essere committata nel repository ed e'
+   riutilizzabile su altri server della pipeline.
+2. **Fallback legacy** — `<PROCESSING_CONFIGS_DIR>/<nome>ProcessingMCP.xml`
+   nella shared directory di Archivematica, usando il nome passato con
+   `--processing-config`.
+
+Setup una tantum della copia locale:
+
+```bash
+mkdir -p ~/arkive/config
+sudo cp /var/archivematica/sharedDirectory/sharedMicroServiceTasksConfigs/processingMCPConfigs/dataverse_001ProcessingMCP.xml ~/arkive/config/
+sudo chown $(whoami): ~/arkive/config/dataverse_001ProcessingMCP.xml
+```
+
+e nel `.env`:
+
+```bash
+AM_PROCESSING_MCP_PATH=/home/<utente>/arkive/config/dataverse_001ProcessingMCP.xml
+```
+
+> **Attenzione:** se la processing configuration viene modificata nel
+> Dashboard di Archivematica, la copia locale va riesportata con il
+> comando `sudo cp` qui sopra. E' un evento raro e consapevole, ma va
+> ricordato. Inoltre, dopo aver modificato il `.env`, riesportare
+> l'ambiente nelle sessioni shell attive:
+> `export $(grep -v '^#' .env | xargs)`
 
 ### Opzioni da riga di comando
 
@@ -367,6 +452,8 @@ le sue versioni.
 | `--transfer-source <UUID>` | dal `.env` | UUID Transfer Source Location |
 | `--transfer-type <tipo>` | `standard` | Tipo di transfer |
 | `--processing-config <nome>` | `dataverse_001` | Processing configuration |
+| `--processing-mcp-path <file>` | dal `.env` | Copia locale versionata del processing config XML (RACCOMANDATO); ha priorita' sulla shared directory |
+| `--ignore-missing-processing-config` | — | Prosegue anche senza processing config XML leggibile (SCONSIGLIATO: i transfer usano il default di Archivematica) |
 | `--auto-approve` | dal `.env` | Approva automaticamente il transfer |
 
 #### Utility
@@ -377,6 +464,7 @@ le sue versioni.
 | `--list-processing-configs` | Elenca processing configuration ed esce |
 | `--no-verify-ssl` | Disabilita verifica SSL |
 | `--poll-interval <sec>` | Intervallo polling (default: 15s) |
+| `--api-timeout <sec>` | Timeout chiamate API (default: 120s, o `AM_API_TIMEOUT` nel `.env`) |
 | `--dry-run` | Mostra cosa farebbe senza eseguire |
 
 ### Esempi
@@ -393,6 +481,9 @@ python3 archivematica_ingest.py --dry-run
 
 # Processing configuration diversa
 python3 archivematica_ingest.py --processing-config automated
+
+# Copia locale del processing config esplicita (senza .env)
+python3 archivematica_ingest.py --processing-mcp-path ~/arkive/config/dataverse_001ProcessingMCP.xml
 ```
 
 ### Output a schermo
@@ -407,6 +498,7 @@ python3 archivematica_ingest.py --processing-config automated
   Transfer Src  : 76ab3067-...
   Transfer type : standard
   Processing cfg: dataverse_001
+  MCP XML       : /home/zfed/arkive/config/dataverse_001ProcessingMCP.xml
   Auto-approve  : True
   SSL verify    : False
   File di stato : stato_archivematica.json
@@ -414,7 +506,7 @@ python3 archivematica_ingest.py --processing-config automated
 
 [1/3] doi_10.13130_RD_UNIMI_KS2PUX
   --> Elaborazione: doi_10.13130_RD_UNIMI_KS2PUX
-    [debug] processingMCP.xml ('dataverse_001') copiato in .../processingMCP.xml
+    [debug] processingMCP.xml copiato e verificato in .../processingMCP.xml
     Avvio transfer 'AIP-20260619-doi_10.13130_RD_UNIMI_KS2PUX' ...
     Transfer UUID: <uuid>
     [approve] Attendo 10s ... (tentativo 1/5)
@@ -544,6 +636,37 @@ Generato da `archivematica_ingest.py`. Traccia lo stato di ogni transfer:
 | `ingested` | Completato -- saltato nelle esecuzioni successive |
 | `failed` | Errore -- ritentato da zero al prossimo avvio |
 
+### Riconciliazione dello stato — riconcilia_stato.py
+
+Quando un pacchetto viene completato con un **intervento manuale** in
+Dashboard (es. approvazione a mano dopo un timeout dello script),
+Archivematica lo porta correttamente a AIP ma il file di stato lo
+registra ancora come `failed`, senza AIP UUID. Un lancio successivo di
+`archivematica_ingest.py` lo riprocesserebbe da zero, creando un
+**AIP duplicato** per lo stesso DOI.
+
+`riconcilia_stato.py` risolve: per ogni pacchetto `failed` interroga lo
+Storage Service, cerca un AIP con status UPLOADED il cui `current_path`
+contenga il DOI, e — solo se il match e' **univoco** — aggiorna la voce
+a `ingested` con l'AIP UUID reale. Con 0 o 2+ match la voce non viene
+toccata e viene segnalata per verifica manuale.
+
+```bash
+# Anteprima senza modifiche (consigliata come primo passo)
+python3 riconcilia_stato.py --dry-run
+
+# Applica (crea automaticamente un backup del file di stato)
+python3 riconcilia_stato.py
+
+# Solo DOI specifici (frammenti, separati da virgola)
+python3 riconcilia_stato.py --dois H4W0JR,NZRX1C
+```
+
+Configurazione: legge `SS_URL`, `SS_USER`, `SS_API_KEY`, `SSL_VERIFY`
+dal `.env` (stessa priorita' della pipeline: CLI > export > `.env`).
+Prima di ogni scrittura crea `stato_archivematica.json.bak_<timestamp>`.
+Exit code: 0 tutto riconciliato, 2 se restano voci ambigue.
+
 ### Reset manuale di un pacchetto
 
 ```bash
@@ -607,16 +730,156 @@ unset EXPORT_DCAT
 python3 scarica_dataverse.py --dcat   # oppure rilancia in una nuova sessione
 ```
 
-### Permission Denied su processingMCPConfigs
+### [ERRORE] Impossibile leggere il processing config
+
+Dalla versione corrente lo script si interrompe (**fail-fast**) se il
+file XML della processing configuration non e' leggibile, invece di
+proseguire e produrre pacchetti processati con la configurazione di
+default di Archivematica (es. con scansione virus attiva).
+
+**Soluzione raccomandata** — copia locale versionata, indipendente dai
+permessi della shared directory di Archivematica:
+
+```bash
+mkdir -p ~/arkive/config
+sudo cp /var/archivematica/sharedDirectory/sharedMicroServiceTasksConfigs/processingMCPConfigs/dataverse_001ProcessingMCP.xml ~/arkive/config/
+sudo chown $(whoami): ~/arkive/config/dataverse_001ProcessingMCP.xml
+# nel .env:
+#   AM_PROCESSING_MCP_PATH=/home/<utente>/arkive/config/dataverse_001ProcessingMCP.xml
+```
+
+**Alternative** (fragili: i permessi possono ri-cambiare a ogni
+update/riavvio di Archivematica):
 
 ```bash
 sudo usermod -aG archivematica <utente>
-# Poi fare logout e login
+# Poi fare logout e login: la membership nel gruppo ha effetto solo
+# sulle NUOVE sessioni. Sessioni tmux/screen di lunga data o job cron
+# avviati prima dell'aggiunta NON vedono il gruppo.
 ```
+
+Per proseguire consapevolmente senza processing config (SCONSIGLIATO):
+`--ignore-missing-processing-config`.
+
+### [ERRORE] Copia di processingMCP.xml nel pacchetto fallita (Permission denied sulla DESTINAZIONE)
+
+Diverso dal caso precedente: qui la sorgente e' leggibile ma la scrittura
+nella radice del pacchetto fallisce. Il pacchetto viene marcato `failed`
+e il transfer NON parte; gli altri pacchetti proseguono normalmente.
+Tipico con Transfer Source su mount Windows/Dropbox (WSL drvfs). Cause:
+
+1. **`processingMCP.xml` gia' presente e non scrivibile** nella cartella
+   (es. residuo di una copia manuale con `sudo`, o attributo read-only
+   di Windows). Lo script rimuove automaticamente la destinazione
+   preesistente prima della copia.
+2. **Lock transitorio del client Dropbox** durante la sincronizzazione
+   del file. Lo script ritenta automaticamente 3 volte con 2s di pausa.
+
+Se l'errore persiste dopo i retry automatici:
+
+```bash
+# Verifica il file incriminato
+ls -l <TRANSFER_SOURCE>/<doi>/processingMCP.xml
+
+# Elenca i pacchetti falliti nel file di stato
+python3 -c "import json; s=json.load(open('stato_archivematica.json')); \
+print([k for k,v in s.items() if v.get('status')=='failed'])"
+```
+
+Poi rilancia `archivematica_ingest.py`: i pacchetti `failed` vengono
+ritentati automaticamente da zero.
+
+> **Buona pratica:** durante esecuzioni massive, mettere in PAUSA la
+> sincronizzazione Dropbox (o escludere `TRANSFER_SOURCE` dal sync)
+> riduce drasticamente i lock transitori e le collisioni.
+
+> **Nota:** un "Permission denied" puo' presentarsi anche con permessi
+> apparentemente corretti su file e directory: verificare il permesso
+> di attraversamento (`x`) su TUTTE le directory del percorso, eventuali
+> ACL (`getfacl`), filesystem di rete (NFS/CIFS con squash degli UID),
+> e che la sessione da cui gira lo script abbia effettivamente la
+> membership nei gruppi attesa (`id` nella STESSA sessione).
 
 ### Transfer REJECTED al riavvio
 
 Lo script rileva automaticamente status `failed` e riparte da zero.
+
+### Read timed out durante transfer/ingest
+
+Con dataset molto grandi o con Archivematica sotto carico (molti ingest
+in coda), le risposte API possono superare il timeout. Lo script gestisce
+automaticamente il caso (retry sulle GET, riaggancio del transfer dopo
+timeout su start_transfer — vedi sezione 5). Se i timeout sono
+ricorrenti, aumentare `AM_API_TIMEOUT` nel `.env` (o `--api-timeout`).
+
+Se un pacchetto viene comunque marcato `failed` ma in Dashboard il
+transfer prosegue e arriva in fondo (anche con approvazione manuale),
+usare `riconcilia_stato.py` per allineare il file di stato PRIMA del
+lancio successivo (vedi sezione 7).
+
+### Transfer "zombie" in Dashboard (in attesa, non rimovibili)
+
+Transfer rimasti in attesa di approvazione che la Dashboard non riesce
+a rifiutare o rimuovere (tipicamente dopo timeout o riavvii di
+MCPServer). Sintomi: le azioni nel menu non hanno effetto, oppure il
+bollino con il conteggio delle decisioni pendenti resta acceso anche
+dopo aver nascosto le voci.
+
+**Lezione chiave:** il flag `hidden` nel database nasconde la voce
+dalla UI ma NON ferma la lavorazione. Finche' il pacchetto resta
+fisicamente nelle watched directories, **MCPServer ricrea i job di
+approvazione a ogni riavvio** (riconoscibili: `createdTime` coincidente
+con l'orario del riavvio). La rimozione va fatta nell'ordine giusto:
+
+```bash
+# 1. Identifica UUID e percorso fisico dei transfer da rimuovere
+mysql -u archivematica -p MCP -e "
+SELECT transferUUID, hidden, currentLocation FROM Transfers
+WHERE currentLocation REGEXP '<frammento1>|<frammento2>';"
+
+# 2. FERMA MCPServer (altrimenti ricrea i job mentre pulisci)
+sudo systemctl stop archivematica-mcp-server
+
+# 3. Rimuovi le cartelle indicate da currentLocation
+#    (%sharedPath% = /var/archivematica/sharedDirectory/)
+#    ATTENZIONE: solo quelle, verificando che i nomi contengano i DOI attesi.
+#    Gli originali in TRANSFER_SOURCE non vengono toccati (start_transfer
+#    lavora su una COPIA).
+
+# 4. Backup e pulizia del database
+mysqldump --no-tablespaces -u archivematica -p MCP Transfers Jobs \
+    > /tmp/backup_transfers_jobs_$(date +%Y%m%d_%H%M).sql
+mysql -u archivematica -p MCP -e "
+UPDATE Transfers SET hidden=1 WHERE transferUUID IN ('<uuid1>', '<uuid2>');
+UPDATE Jobs SET currentStep=4 WHERE currentStep=1
+    AND SIPUUID IN ('<uuid1>', '<uuid2>');"
+# (currentStep: 1 = awaiting decision, 4 = failed)
+
+# 5. Riavvia e verifica
+sudo systemctl start archivematica-mcp-server
+sudo systemctl restart archivematica-dashboard
+mysql -u archivematica -p MCP -e \
+    "SELECT COUNT(*) FROM Jobs WHERE currentStep = 1;"   # atteso: 0, e deve RESTARE 0
+```
+
+Nota su mysqldump: senza `--no-tablespaces` l'utente `archivematica`
+riceve "Access denied; you need PROCESS privilege" — il flag e' innocuo
+per il backup di singole tabelle.
+
+### Permission denied sulla copia di processingMCP.xml nei pacchetti (cartelle di proprieta' altrui)
+
+Se alcune cartelle nella Transfer Source appartengono a un altro utente
+(es. `archivematica:archivematica` con permessi 755), la copia di
+`processingMCP.xml` fallisce con Permission denied nonostante retry.
+Causa tipica: script lanciati in passato con `sudo -u archivematica` o
+come root. **Mai lanciare gli script della pipeline con un utente
+diverso da quello operativo.** Rimedio:
+
+```bash
+# Riporta all'utente operativo la proprieta' delle cartelle fallite
+# (basta la radice del pacchetto; il gruppo archivematica resta per la lettura)
+sudo chown <utente>:archivematica <TRANSFER_SOURCE>/<doi>/
+```
 
 ### 400 "Unable to determine the status of the unit"
 
@@ -685,6 +948,10 @@ python3 archivematica_ingest.py
 
 # 5. Verifica lo stato
 cat stato_archivematica.json | python3 -m json.tool
+
+# 6. (solo se e' servito un intervento manuale in Dashboard)
+#    Riconcilia il file di stato con gli AIP reali
+python3 riconcilia_stato.py --dry-run && python3 riconcilia_stato.py
 ```
 
 Per le esecuzioni successive, ripetere i passi 2 e 4: gli script elaborano
