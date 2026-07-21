@@ -22,9 +22,9 @@
 #
 # USO
 #   cd tools/dataverse-archivematica          # per leggere le stesse convenzioni
-#   # (opzionale) esporta le stesse variabili del .env:
-#   export DATAVERSE_API_KEY=...              # per dataset non pubblici
-#   export SSL_VERIFY=false                   # se certificato self-signed
+#   # I parametri vengono letti dal file .env della cartella corrente (stesso
+#   # .env della pipeline: DATAVERSE_URL, DATAVERSE_API_KEY, SSL_VERIFY). Le
+#   # variabili esportate nella shell hanno comunque la precedenza sul .env.
 #   python3 diagnostica_checksum.py [doi] [--max N]
 #
 #   Default doi: doi:10.13130/RD_UNIMI/JMKSAW  (il dataset più problematico)
@@ -40,6 +40,31 @@ import sys
 
 import requests
 import urllib3
+
+
+def _load_dotenv(env_file: str = ".env") -> None:
+    """
+    Carica variabili da un file .env senza dipendenze esterne (stesso
+    comportamento di scarica_dataverse.py). Formato: KEY=value, ignora righe
+    vuote e commenti (#). Le variabili gia' presenti nell'ambiente NON vengono
+    sovrascritte (la shell ha la precedenza sul .env).
+    """
+    if not os.path.isfile(env_file):
+        return
+    with open(env_file, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key   = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+
+# IMPORTANTE: caricare il .env PRIMA di leggere le costanti che ne dipendono.
+_load_dotenv()
 
 BASE_URL = os.environ.get("DATAVERSE_URL", "https://dataverse.unimi.it").rstrip("/")
 API_KEY  = os.environ.get("DATAVERSE_API_KEY", "")
