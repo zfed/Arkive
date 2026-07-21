@@ -202,8 +202,10 @@ Per ogni DOI elencato in `dois.txt`:
 2. **Controlla se il dataset contiene file**: se e' vuoto, non crea la
    directory e registra il DOI in `doi_vuoti.json`
 3. Per ciascuna versione:
-   - scarica tutti i file del dataset, **verificando l'integrità** di ognuno
-     contro il checksum (o la dimensione) dichiarato da Dataverse
+   - scarica tutti i file del dataset — per i file **ingeriti come tabellari**
+     scarica l'**originale** depositato (`format=original`), non la derivata
+     `.tab` — **verificando l'integrità** di ognuno contro il checksum (o la
+     dimensione) dichiarato da Dataverse
    - salva i metadati Dataverse in `dataverse.json`
    - genera `metadata.csv` Dublin Core per quella versione
    - genera `dcat.json` (DCAT-AP JSON-LD) se `EXPORT_DCAT=true`
@@ -225,6 +227,37 @@ Cause tipiche di dataset vuoto:
 - accesso ristretto (embargo attivo)
 - dataset pubblicato ma senza file allegati
 
+### Conservazione dell'originale (file tabellari)
+
+Quando un file viene caricato su Dataverse in un formato tabellare riconosciuto
+(Stata `.dta`, SPSS `.sav`, CSV, xlsx…), Dataverse lo **ingerisce**: conserva il
+file originale depositato e ne genera una rappresentazione derivata `.tab`
+(tab-delimited), che è quella servita di default dall'API di accesso.
+
+Ai fini della conservazione questa distinzione è decisiva. L'oggetto autentico da
+preservare secondo OAIS è il **bitstream originale depositato dal ricercatore**,
+non la normalizzazione prodotta da Dataverse: è Archivematica, in fase di ingest,
+a generare le derivate di preservazione e accesso secondo il proprio FPR. Inoltre
+la derivata `.tab` viene **rigenerata a ogni richiesta** e ha un checksum
+instabile, mentre l'originale è statico e verificabile.
+
+Per questo, quando `_is_ingested_tabular` riconosce un file ingerito (presenza dei
+campi `originalFileName`/`originalFileFormat`), la pipeline:
+
+1. scarica l'originale con `…/api/access/datafile/{id}?format=original`;
+2. lo salva con il **nome originale** (`02500.csv`, `dati.dta`…), non `.tab` —
+   fondamentale perché Archivematica identifichi correttamente il formato
+   (Siegfried/FITS) e pianifichi la conservazione giusta;
+3. ne verifica l'integrità con il checksum del manifest.
+
+**Fallback**: se `format=original` non è disponibile (alcune versioni Dataverse
+rispondono `404`), la pipeline ripiega sulla derivata `.tab`, in modalità degradata
+tracciata a log con `[FALLBACK]`, invece di far fallire il DOI. Sulla `.tab` la
+verifica del checksum non è applicabile: si controlla solo che il file non sia vuoto.
+
+I file **non** ingeriti (PDF, ZIP, immagini, e ogni file non tabellare) non hanno un
+originale distinto: vengono scaricati e verificati come sempre, senza `format=original`.
+
 ### Verifica di integrità dei file
 
 Ogni file scaricato viene confrontato con i metadati di integrità che Dataverse
@@ -235,21 +268,28 @@ monco entrerebbe nel SIP, Archivematica ne calcolerebbe un checksum PREMIS valid
 un contenuto errato, e finirebbe nell'AIP: una corruzione silenziosa, il difetto
 peggiore in un contesto di conservazione OAIS/PREMIS.
 
+Per i file ingeriti il checksum del manifest si riferisce all'**originale** (Dataverse
+lo calcola al momento del caricamento, prima dell'ingest — verificato empiricamente su
+30/30 file campionati di JMKSAW su dataverse.unimi.it). Poiché la pipeline scarica
+proprio l'originale, la verifica è **fixity forte**. È anche il motivo per cui in
+passato i `.tab` producevano falsi mismatch di massa: si confrontavano i byte della
+derivata con il checksum dell'originale.
+
 Il controllo usa, in ordine di preferenza:
 
-1. **Dimensione attesa** (`fileSize`) come controllo di skip primario. Un download
-   troncato si manifesta sempre come byte mancanti, quindi la sola dimensione lo
-   intercetta con un costo minimo (una `stat()`), senza rileggere l'intero inventario
-   a ogni esecuzione — aspetto rilevante su drvfs.
+1. **Dimensione attesa** come controllo di skip primario (per gli ingeriti
+   `originalFileSize`, altrimenti `fileSize`). Un download troncato si manifesta
+   sempre come byte mancanti, quindi la sola dimensione lo intercetta con un costo
+   minimo (una `stat()`), senza rileggere l'intero inventario a ogni esecuzione —
+   aspetto rilevante su drvfs.
 2. **Checksum** come fallback di skip quando la dimensione non è disponibile, e
    soprattutto come **verifica post-download** su ogni file appena scaricato. Il
    checksum Dataverse viene letto in entrambi i formati esistenti:
    - formato nuovo: `checksum: {"type": "MD5" | "SHA-1" | "SHA-256", "value": "..."}`
    - formato vecchio: `md5: "..."`
 
-   con il `type` mappato all'algoritmo `hashlib` corretto (l'installazione UNIMI
-   potrebbe non usare MD5 di default: al primo run si verifica dal log, cercando se
-   compare `(MD5 ok)` o `(SHA1 ok)` nei messaggi di `[SKIP]`).
+   con il `type` mappato all'algoritmo `hashlib` corretto (non si assume MD5: al primo
+   run si verifica dal log, cercando se compare `(MD5 ok)` o `(SHA1 ok)` nei `[SKIP]`).
 3. **Comportamento storico** (skip se il file esiste e non è vuoto) come ultima
    spiaggia, solo quando né dimensione né checksum sono disponibili.
 
@@ -283,11 +323,21 @@ gia' scaricati, senza chiamate HTTP aggiuntive. Mapping principale:
 | `dct:issued` | `productionDate` / `distributionDate` |
 | `dct:publisher` | `publisher` |
 | `dct:license` | `license` / `termsOfUse` |
-| `dcat:distribution` | file (formato, dimensione, checksum MD5) |
+| `dcat:distribution` | file (formato, dimensione, checksum) — per i file ingeriti descrive l'**originale** |
 | `owl:versionInfo` | numero versione (es. `1.0`) |
 
-**`schema.json`** — Schema.org JSON-LD scaricato dall'API Dataverse
-tramite l'exporter `schema.org`.
+Per i file ingeriti come tabellari la `dcat:distribution` descrive coerentemente
+l'oggetto conservato, cioè l'**originale**: `dct:title` = nome originale,
+`dcat:mediaType` = `originalFileFormat`, `dcat:byteSize` = `originalFileSize`,
+`dcat:accessURL` con `?format=original`, e checksum con l'algoritmo dichiarato nel
+manifest (non più forzato a MD5). Per i file non ingeriti la distribution descrive
+il file così com'è.
+
+**`schema.json`** — Schema.org JSON-LD scaricato dall'API Dataverse tramite
+l'exporter `schema.org`. È la vista *di Dataverse* sul dataset e quindi riflette la
+rappresentazione di accesso (`.tab`), non necessariamente l'originale che la pipeline
+conserva: va inteso come copia fedele di ciò che il repository pubblica, non come
+descrizione dell'AIP.
 
 ### Opzioni da riga di comando
 
@@ -370,7 +420,9 @@ Lo script può essere rieseguito senza duplicare il lavoro già fatto:
   `[SKIP] Gia' presente (dimensione ok)`; un file incompleto o corrotto viene
   invece `[RISCARICO]` e ri-scaricato. Questo rende la ri-esecuzione anche un
   modo per **sanare** una cartella rimasta con download parziali dopo
-  un'interruzione.
+  un'interruzione. Nota: i file ingeriti sono riconosciuti per **nome originale**
+  (`02500.csv`), quindi cartelle popolate da run precedenti a questa modifica —
+  che contengono i vecchi `.tab` — non vengono riconosciute (vedi troubleshooting)
 - `dataverse.json`, `dcat.json`, `schema.json`, `metadata.csv` di versione:
   generati solo se mancanti
 - `metadata.csv` complessivo: **sempre rigenerato**
@@ -798,6 +850,27 @@ Durante il download `scarica_dataverse.py` confronta ogni file con il checksum
 
 Per sapere quale algoritmo di checksum usa davvero l'istanza, osservare la dicitura
 tra parentesi nei messaggi di `[SKIP]` (`(MD5 ok)`, `(SHA1 ok)`, ...).
+
+### [FALLBACK] salvata derivata .tab
+
+Compare quando, per un file ingerito come tabellare, `format=original` non è
+disponibile (tipicamente un `404` su alcune versioni Dataverse). La pipeline
+ripiega sulla derivata `.tab` invece di far fallire il DOI. È una modalità
+**degradata**: il pacchetto conterrà la `.tab` (non verificabile via checksum)
+invece dell'originale. Se il messaggio è isolato, è tollerabile; se è sistematico
+su un'istanza, conviene verificare con l'amministratore Dataverse perché
+`format=original` non risponde, dato che l'obiettivo di conservazione è l'originale.
+
+### Ho ri-scaricato e mi ritrovo sia i `.csv`/`.dta` sia i vecchi `.tab`
+
+Da quando la pipeline conserva gli originali, i file ingeriti vengono salvati col
+nome originale (`02500.csv`), non più `02500.tab`. Su una cartella di download
+popolata da un run **precedente** a questa modifica, un nuovo run non riconosce i
+`.tab` come "già presenti" (cerca `02500.csv`) e scarica gli originali **accanto**
+ai vecchi `.tab`. Non è un errore del codice, è la conseguenza del cambio di nome.
+Prima di rilanciare su cartelle già popolate in passato, svuotarle (o rimuovere i
+`.tab` residui). La migrazione dei pacchetti/AIP già prodotti con i `.tab` è un
+tema a sé, da gestire con una procedura dedicata.
 
 ### [ERRORE] Impossibile leggere il processing config
 

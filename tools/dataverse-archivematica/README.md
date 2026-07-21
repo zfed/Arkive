@@ -7,7 +7,7 @@ Pipeline automatizzata per trasferire dataset da **Dataverse UNIMI**
 
 | Script | Descrizione |
 |---|---|
-| `scarica_dataverse.py` | Scarica dataset e metadati da Dataverse (tutte le versioni), verifica che non siano vuoti, controlla l'integrità di ogni file scaricato (checksum/dimensione) e li organizza in pacchetti compatibili con Archivematica |
+| `scarica_dataverse.py` | Scarica dataset e metadati da Dataverse (tutte le versioni), conserva l'originale depositato dei file ingeriti come tabellari, verifica l'integrità di ogni file (checksum/dimensione) e li organizza in pacchetti compatibili con Archivematica |
 | `archivematica_ingest.py` | Trasferisce e ingesta i pacchetti in Archivematica con approvazione automatica del transfer |
 | `riconcilia_stato.py` | Riconcilia i pacchetti "failed" del file di stato con gli AIP realmente presenti nello Storage Service (es. dopo approvazioni manuali), evitando ingest duplicati |
 
@@ -123,12 +123,23 @@ Vedi `manuale_dataverse_archivematica.pdf` per il manuale completo.
 
 - I dataset vuoti (nessun file in nessuna versione) vengono rilevati automaticamente:
   la directory non viene creata e il DOI viene registrato in `doi_vuoti.json`
+- **Conservazione dell'originale per i file tabellari**: i file ingeriti da
+  Dataverse (Stata, SPSS, CSV, xlsx…) vengono serviti di default come derivata
+  `.tab`, generata al volo e con checksum instabile. La pipeline scarica invece
+  l'**originale** depositato (`format=original`), salvandolo col nome originale
+  (`.csv`, `.dta`…): è l'oggetto autentico da conservare secondo OAIS, ed è
+  Archivematica — non Dataverse — a produrre le derivate di preservazione. Se
+  `format=original` non è disponibile (404), la pipeline ripiega sulla `.tab`
+  in modalità degradata tracciata a log (`[FALLBACK]`)
 - **Verifica di integrità dei file scaricati**: `scarica_dataverse.py` confronta
   ogni file con il checksum fornito da Dataverse (o, in mancanza, con la dimensione
-  attesa). Un file già presente viene saltato solo se supera questo controllo; un
-  download troncato o corrotto viene rimosso e ri-scaricato invece di essere marcato
-  come "già presente". Questo evita che un file monco entri nel SIP e finisca nell'AIP
-  con un checksum PREMIS valido calcolato su un contenuto errato (corruzione silenziosa)
+  attesa). Per i file ingeriti il checksum del manifest si riferisce all'originale
+  (verificato empiricamente su dataverse.unimi.it), quindi la verifica sull'originale
+  scaricato è **fixity forte**. Un file già presente viene saltato solo se supera il
+  controllo; un download troncato o corrotto viene rimosso e ri-scaricato invece di
+  essere marcato come "già presente". Questo evita che un file monco entri nel SIP e
+  finisca nell'AIP con un checksum PREMIS valido calcolato su un contenuto errato
+  (corruzione silenziosa)
 - **Fail-fast sul processing config**: se il file XML della processing
   configuration non e' leggibile, `archivematica_ingest.py` si interrompe
   PRIMA di avviare qualunque transfer (senza `processingMCP.xml` i pacchetti
