@@ -202,7 +202,8 @@ Per ogni DOI elencato in `dois.txt`:
 2. **Controlla se il dataset contiene file**: se e' vuoto, non crea la
    directory e registra il DOI in `doi_vuoti.json`
 3. Per ciascuna versione:
-   - scarica tutti i file del dataset
+   - scarica tutti i file del dataset, **verificando l'integrità** di ognuno
+     contro il checksum (o la dimensione) dichiarato da Dataverse
    - salva i metadati Dataverse in `dataverse.json`
    - genera `metadata.csv` Dublin Core per quella versione
    - genera `dcat.json` (DCAT-AP JSON-LD) se `EXPORT_DCAT=true`
@@ -223,6 +224,45 @@ Cause tipiche di dataset vuoto:
 - dataset ancora in bozza (non ancora pubblicato)
 - accesso ristretto (embargo attivo)
 - dataset pubblicato ma senza file allegati
+
+### Verifica di integrità dei file
+
+Ogni file scaricato viene confrontato con i metadati di integrità che Dataverse
+espone nel `dataFile`. Lo scopo è impedire che un download **troncato** (interruzione,
+timeout, lock transitori su drvfs/Dropbox) lasci sul disco un file parziale che ai
+run successivi verrebbe considerato "già presente" e non più ri-scaricato. Un file
+monco entrerebbe nel SIP, Archivematica ne calcolerebbe un checksum PREMIS valido su
+un contenuto errato, e finirebbe nell'AIP: una corruzione silenziosa, il difetto
+peggiore in un contesto di conservazione OAIS/PREMIS.
+
+Il controllo usa, in ordine di preferenza:
+
+1. **Dimensione attesa** (`fileSize`) come controllo di skip primario. Un download
+   troncato si manifesta sempre come byte mancanti, quindi la sola dimensione lo
+   intercetta con un costo minimo (una `stat()`), senza rileggere l'intero inventario
+   a ogni esecuzione — aspetto rilevante su drvfs.
+2. **Checksum** come fallback di skip quando la dimensione non è disponibile, e
+   soprattutto come **verifica post-download** su ogni file appena scaricato. Il
+   checksum Dataverse viene letto in entrambi i formati esistenti:
+   - formato nuovo: `checksum: {"type": "MD5" | "SHA-1" | "SHA-256", "value": "..."}`
+   - formato vecchio: `md5: "..."`
+
+   con il `type` mappato all'algoritmo `hashlib` corretto (l'installazione UNIMI
+   potrebbe non usare MD5 di default: al primo run si verifica dal log, cercando se
+   compare `(MD5 ok)` o `(SHA1 ok)` nei messaggi di `[SKIP]`).
+3. **Comportamento storico** (skip se il file esiste e non è vuoto) come ultima
+   spiaggia, solo quando né dimensione né checksum sono disponibili.
+
+Conseguenze pratiche sui file già presenti:
+
+- file **integro** → `[SKIP] Gia' presente (dimensione ok)` (o `(MD5 ok)` / `(SHA1 ok)`)
+- file **incompleto o corrotto** → `[RISCARICO] ...` e il file viene ri-scaricato
+  sovrascrivendo quello difettoso
+
+Se un file appena scaricato **non** supera la verifica post-download, viene **rimosso**
+e il download è segnalato come errore: la versione risulta `partial` nel
+`riepilogo_download.json` e nessun file difettoso resta sul disco a essere saltato
+al run seguente.
 
 ### Esportazione DCAT-AP e Schema.org
 
@@ -323,7 +363,14 @@ python3 scarica_dataverse.py --no-verify-ssl
 
 ### Comportamento idempotente
 
-- File gia' scaricati: **saltati**
+Lo script può essere rieseguito senza duplicare il lavoro già fatto:
+
+- File già scaricati: **saltati solo se superano la verifica di integrità**
+  (vedi "Verifica di integrità dei file"). Un file integro produce
+  `[SKIP] Gia' presente (dimensione ok)`; un file incompleto o corrotto viene
+  invece `[RISCARICO]` e ri-scaricato. Questo rende la ri-esecuzione anche un
+  modo per **sanare** una cartella rimasta con download parziali dopo
+  un'interruzione.
 - `dataverse.json`, `dcat.json`, `schema.json`, `metadata.csv` di versione:
   generati solo se mancanti
 - `metadata.csv` complessivo: **sempre rigenerato**
@@ -729,6 +776,28 @@ che sovrascrivono il `.env`:
 unset EXPORT_DCAT
 python3 scarica_dataverse.py --dcat   # oppure rilancia in una nuova sessione
 ```
+
+### [RISCARICO] ripetuti o "checksum non combacia" su un file
+
+Durante il download `scarica_dataverse.py` confronta ogni file con il checksum
+(o la dimensione) dichiarato da Dataverse. Alcuni casi:
+
+- `[RISCARICO] Dimensione non combacia` su un file **già presente**: la copia
+  locale è più piccola dell'attesa, tipicamente un download interrotto in
+  precedenza. È il comportamento voluto: il file viene ri-scaricato. Nessuna
+  azione necessaria.
+- `ERRORE (... non combacia)` su un file **appena scaricato**, che si ripete a
+  ogni run: il download arriva sistematicamente corrotto o troncato. Verificare
+  la stabilità della rete/proxy e, se il file è grande, che non si stia colpendo
+  un limite lato server. Il file difettoso viene rimosso a ogni tentativo, quindi
+  non entra mai nel pacchetto.
+- Nel log compare `[SKIP] Gia' presente (nessuna verifica disponibile)`: Dataverse
+  non ha esposto né dimensione né checksum per quel file. Lo skip ricade sul
+  comportamento storico (esiste e non è vuoto); in questo caso l'integrità non è
+  garantita dallo script e va eventualmente verificata a valle.
+
+Per sapere quale algoritmo di checksum usa davvero l'istanza, osservare la dicitura
+tra parentesi nei messaggi di `[SKIP]` (`(MD5 ok)`, `(SHA1 ok)`, ...).
 
 ### [ERRORE] Impossibile leggere il processing config
 
