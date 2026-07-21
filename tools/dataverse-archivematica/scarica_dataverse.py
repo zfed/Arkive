@@ -50,6 +50,7 @@ Uso:
 
 import argparse
 import csv
+import hashlib
 import logging
 import json
 import os
@@ -431,6 +432,36 @@ def build_dcat_from_version(doi: str, version: dict) -> str:
 
 # ── Download file ─────────────────────────────────────────────────────────────
 
+def _hash_file(path: Path, algo: str = "md5", chunk: int = 1 << 20) -> str:
+    """Calcola l'hash di un file leggendolo a blocchi (algo: 'md5', 'sha1', ...)."""
+    h = hashlib.new(algo)
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(chunk), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _expected_checksum(df: dict) -> tuple[str | None, str]:
+    """
+    Estrae (valore, algoritmo) del checksum dal dataFile Dataverse, gestendo sia
+    df["checksum"] = {"type", "value"} (formato nuovo) sia df["md5"] (vecchio).
+    Restituisce (None, "md5") se non disponibile.
+    """
+    chk = df.get("checksum")
+    if isinstance(chk, dict) and chk.get("value"):
+        raw_type = (chk.get("type") or "MD5").upper().replace("-", "")
+        algo = {
+            "MD5": "md5",
+            "SHA1": "sha1",
+            "SHA256": "sha256",
+            "SHA512": "sha512",
+        }.get(raw_type, "md5")
+        return chk["value"], algo
+    if df.get("md5"):
+        return df["md5"], "md5"
+    return None, "md5"
+
+
 def download_file(file_info: dict, data_dir: Path) -> bool:
     """Scarica un singolo file del dataset. Restituisce True se riuscito."""
     df      = file_info.get("dataFile", {})
@@ -442,9 +473,40 @@ def download_file(file_info: dict, data_dir: Path) -> bool:
         return False
 
     dest = data_dir / label
+
+    # Metadati di integrita' forniti da Dataverse per questo file.
+    # NB: il campo dimensione compare come "fileSize" o "filesize" a seconda
+    # della versione dell'API (stesso doppio controllo usato per il DCAT).
+    expected_size       = df.get("fileSize") or df.get("filesize")
+    expected_hash, algo = _expected_checksum(df)
+
+    # ── Decisione di SKIP su file gia' presente ─────────────────────────────
+    # Strategia: la dimensione attesa e' il controllo di skip primario, perche'
+    # il bug che vogliamo intercettare (download troncato) si manifesta sempre
+    # come byte mancanti; e' un solo stat() e non rilegge l'intero inventario a
+    # ogni run (rilevante su drvfs/Dropbox). L'hash resta come fallback quando
+    # la dimensione non e' nota, e come verifica post-download piu' sotto.
     if dest.exists() and dest.stat().st_size > 0:
-        print(f"      [SKIP] Gia' presente: {label}")
-        return True
+        actual_size = dest.stat().st_size
+        if expected_size is not None:
+            if actual_size == expected_size:
+                print(f"      [SKIP] Gia' presente (dimensione ok): {label}")
+                return True
+            print(f"      [RISCARICO] Dimensione non combacia "
+                  f"(attesi {expected_size} B, trovati {actual_size} B): {label}")
+            # prosegue e riscarica sovrascrivendo
+        elif expected_hash is not None:
+            local_hash = _hash_file(dest, algo)
+            if local_hash.lower() == expected_hash.lower():
+                print(f"      [SKIP] Gia' presente ({algo.upper()} ok): {label}")
+                return True
+            print(f"      [RISCARICO] {algo.upper()} non combacia "
+                  f"(atteso {expected_hash[:8]}..., trovato {local_hash[:8]}...): {label}")
+            # prosegue e riscarica sovrascrivendo
+        else:
+            # Ne' dimensione ne' checksum disponibili: comportamento storico.
+            print(f"      [SKIP] Gia' presente (nessuna verifica disponibile): {label}")
+            return True
 
     url = f"{BASE_URL}/api/access/datafile/{file_id}"
     print(f"      Scarico: {label} ...", end=" ", flush=True)
@@ -454,11 +516,36 @@ def download_file(file_info: dict, data_dir: Path) -> bool:
             for chunk in r.iter_content(chunk_size=8192):
                 f.write(chunk)
         size_kb = dest.stat().st_size // 1024
-        print(f"OK ({size_kb} KB)")
-        return True
     except Exception as e:
         print(f"ERRORE ({e})")
         return False
+
+    # ── Verifica di integrita' del file appena scaricato ────────────────────
+    # Intercetta i troncamenti nel momento in cui avvengono: senza questo, un
+    # file monco verrebbe marcato [SKIP] al run successivo ed entrerebbe nel
+    # SIP come corruzione silenziosa. In caso di mismatch il file va rimosso,
+    # cosi' il run seguente non lo salta e lo riscarica pulito.
+    if expected_hash is not None:
+        local_hash = _hash_file(dest, algo)
+        if local_hash.lower() != expected_hash.lower():
+            print(f"ERRORE ({algo.upper()} non combacia: "
+                  f"atteso {expected_hash[:8]}..., ottenuto {local_hash[:8]}...)")
+            try:
+                dest.unlink()
+            except OSError:
+                pass
+            return False
+    elif expected_size is not None and dest.stat().st_size != expected_size:
+        print(f"ERRORE (dimensione post-download errata: "
+              f"attesi {expected_size} B, ottenuti {dest.stat().st_size} B)")
+        try:
+            dest.unlink()
+        except OSError:
+            pass
+        return False
+
+    print(f"OK ({size_kb} KB)")
+    return True
 
 
 # ── Generazione metadata.csv per Archivematica ───────────────────────────────
