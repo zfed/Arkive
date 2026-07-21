@@ -366,27 +366,50 @@ def build_dcat_from_version(doi: str, version: dict) -> str:
     if "keyword" in cf:
         keywords = _compound_values(cf["keyword"], "keywordValue")
 
+    # Mappa algoritmo hashlib -> URI SPDX (evita l'hardcode di md5).
+    _SPDX_ALGO = {
+        "md5":    "spdx:checksumAlgorithm_md5",
+        "sha1":   "spdx:checksumAlgorithm_sha1",
+        "sha256": "spdx:checksumAlgorithm_sha256",
+        "sha512": "spdx:checksumAlgorithm_sha512",
+    }
+
     distributions = []
     for file_info in version.get("files", []):
         df      = file_info.get("dataFile", {})
         file_id = df.get("id")
         label   = file_info.get("label") or df.get("filename") or f"file_{file_id}"
-        mime    = df.get("contentType", "")
-        size    = df.get("fileSize") or df.get("filesize")
-        md5     = df.get("md5", "")
 
-        dist: dict = {"@type": "dcat:Distribution", "dct:title": label}
+        # Coerenza con cio' che viene effettivamente conservato: per i file
+        # ingeriti come tabellari la pipeline archivia l'ORIGINALE, quindi la
+        # distribution descrive l'originale (nome, formato, dimensione, URL con
+        # format=original). Il checksum del manifest e' gia' quello dell'originale.
+        ingested = _is_ingested_tabular(df)
+        if ingested:
+            d_title  = df.get("originalFileName") or label
+            mime     = df.get("originalFileFormat") or df.get("contentType", "")
+            size     = df.get("originalFileSize") or df.get("fileSize") or df.get("filesize")
+            accessid = f"{BASE_URL}/api/access/datafile/{file_id}?format=original"
+        else:
+            d_title  = label
+            mime     = df.get("contentType", "")
+            size     = df.get("fileSize") or df.get("filesize")
+            accessid = f"{BASE_URL}/api/access/datafile/{file_id}"
+
+        chk_val, chk_algo = _expected_checksum(df)
+
+        dist: dict = {"@type": "dcat:Distribution", "dct:title": d_title}
         if file_id:
-            dist["dcat:accessURL"] = {"@id": f"{BASE_URL}/api/access/datafile/{file_id}"}
+            dist["dcat:accessURL"] = {"@id": accessid}
         if mime:
             dist["dcat:mediaType"] = mime
         if size:
             dist["dcat:byteSize"] = size
-        if md5:
+        if chk_val:
             dist["spdx:checksum"] = {
                 "@type":              "spdx:Checksum",
-                "spdx:algorithm":     "spdx:checksumAlgorithm_md5",
-                "spdx:checksumValue": md5,
+                "spdx:algorithm":     _SPDX_ALGO.get(chk_algo, "spdx:checksumAlgorithm_md5"),
+                "spdx:checksumValue": chk_val,
             }
         if license_val:
             dist["dct:license"] = license_val
@@ -462,6 +485,25 @@ def _expected_checksum(df: dict) -> tuple[str | None, str]:
     return None, "md5"
 
 
+def _is_ingested_tabular(df: dict) -> bool:
+    """
+    True se il file e' stato ingerito da Dataverse come tabellare, cioe' se
+    esiste un ORIGINALE depositato (Stata/SPSS/CSV/xlsx...) da cui e' stata
+    generata la versione .tab servita di default.
+
+    Per questi file la pipeline scarica l'ORIGINALE (format=original), non la
+    derivata .tab: e' l'oggetto autentico da conservare (OAIS) e, verificato
+    empiricamente su dataverse.unimi.it, il checksum del manifest si riferisce
+    proprio all'originale (calcolato al caricamento, prima dell'ingest) ->
+    fixity forte. La derivata .tab, invece, e' rigenerata a ogni richiesta e
+    ha checksum instabile.
+
+    Il segnale affidabile e' la presenza dei campi original*, che Dataverse
+    valorizza solo dopo un ingest riuscito.
+    """
+    return bool(df.get("originalFileName") or df.get("originalFileFormat"))
+
+
 def download_file(file_info: dict, data_dir: Path) -> bool:
     """Scarica un singolo file del dataset. Restituisce True se riuscito."""
     df      = file_info.get("dataFile", {})
@@ -472,51 +514,70 @@ def download_file(file_info: dict, data_dir: Path) -> bool:
         print(f"  [ATTENZIONE] ID file mancante, salto: {label}")
         return False
 
-    dest = data_dir / label
+    # ── Scelta della rappresentazione da conservare ─────────────────────────
+    # Per i file ingeriti come tabellari si conserva l'ORIGINALE depositato
+    # (format=original), non la derivata .tab generata da Dataverse. I metadati
+    # di integrita' e il nome del file seguono di conseguenza.
+    ingested = _is_ingested_tabular(df)
+    if ingested:
+        orig_name     = df.get("originalFileName") or label
+        dest          = data_dir / orig_name
+        expected_size = df.get("originalFileSize")
+        params        = {"format": "original"}
+        etichetta     = f"{orig_name} (originale di {label})"
+    else:
+        dest          = data_dir / label
+        # NB: la dimensione compare come "fileSize" o "filesize" a seconda della
+        # versione dell'API (stesso doppio controllo usato per il DCAT).
+        expected_size = df.get("fileSize") or df.get("filesize")
+        params        = None
+        etichetta     = label
 
-    # Metadati di integrita' forniti da Dataverse per questo file.
-    # NB: il campo dimensione compare come "fileSize" o "filesize" a seconda
-    # della versione dell'API (stesso doppio controllo usato per il DCAT).
-    expected_size       = df.get("fileSize") or df.get("filesize")
+    # Per gli ingeriti il checksum del manifest si riferisce all'originale
+    # (verificato empiricamente): e' quindi autoritativo su entrambi i rami.
     expected_hash, algo = _expected_checksum(df)
 
     # ── Decisione di SKIP su file gia' presente ─────────────────────────────
-    # Strategia: la dimensione attesa e' il controllo di skip primario, perche'
-    # il bug che vogliamo intercettare (download troncato) si manifesta sempre
-    # come byte mancanti; e' un solo stat() e non rilegge l'intero inventario a
-    # ogni run (rilevante su drvfs/Dropbox). L'hash resta come fallback quando
-    # la dimensione non e' nota, e come verifica post-download piu' sotto.
+    # La dimensione attesa e' il controllo di skip primario: il troncamento si
+    # manifesta sempre come byte mancanti, e' un solo stat() e non rilegge
+    # l'intero inventario a ogni run (rilevante su drvfs/Dropbox). L'hash resta
+    # come fallback quando la dimensione non e' nota, e come verifica
+    # post-download piu' sotto.
     if dest.exists() and dest.stat().st_size > 0:
         actual_size = dest.stat().st_size
         if expected_size is not None:
             if actual_size == expected_size:
-                print(f"      [SKIP] Gia' presente (dimensione ok): {label}")
+                print(f"      [SKIP] Gia' presente (dimensione ok): {etichetta}")
                 return True
             print(f"      [RISCARICO] Dimensione non combacia "
-                  f"(attesi {expected_size} B, trovati {actual_size} B): {label}")
-            # prosegue e riscarica sovrascrivendo
+                  f"(attesi {expected_size} B, trovati {actual_size} B): {etichetta}")
         elif expected_hash is not None:
             local_hash = _hash_file(dest, algo)
             if local_hash.lower() == expected_hash.lower():
-                print(f"      [SKIP] Gia' presente ({algo.upper()} ok): {label}")
+                print(f"      [SKIP] Gia' presente ({algo.upper()} ok): {etichetta}")
                 return True
             print(f"      [RISCARICO] {algo.upper()} non combacia "
-                  f"(atteso {expected_hash[:8]}..., trovato {local_hash[:8]}...): {label}")
-            # prosegue e riscarica sovrascrivendo
+                  f"(atteso {expected_hash[:8]}..., trovato {local_hash[:8]}...): {etichetta}")
         else:
-            # Ne' dimensione ne' checksum disponibili: comportamento storico.
-            print(f"      [SKIP] Gia' presente (nessuna verifica disponibile): {label}")
+            print(f"      [SKIP] Gia' presente (nessuna verifica disponibile): {etichetta}")
             return True
 
     url = f"{BASE_URL}/api/access/datafile/{file_id}"
-    print(f"      Scarico: {label} ...", end=" ", flush=True)
+    print(f"      Scarico: {etichetta} ...", end=" ", flush=True)
     try:
-        r = get_with_retry(url, stream=True)
+        r = get_with_retry(url, params=params, stream=True)
         with open(dest, "wb") as f:
             for chunk in r.iter_content(chunk_size=8192):
                 f.write(chunk)
         size_kb = dest.stat().st_size // 1024
     except Exception as e:
+        # Caso noto: alcune installazioni/versioni Dataverse rispondono 404 a
+        # format=original. Invece di fallire, si ripiega sulla derivata .tab
+        # (modalita' degradata, tracciata a log), che e' comunque meglio di
+        # nessun file. La verifica checksum non e' applicabile alla .tab.
+        if ingested:
+            print(f"ATTENZIONE (originale non disponibile: {e}) -> fallback .tab")
+            return _download_tab_fallback(file_id, label, data_dir)
         print(f"ERRORE ({e})")
         return False
 
@@ -545,6 +606,36 @@ def download_file(file_info: dict, data_dir: Path) -> bool:
         return False
 
     print(f"OK ({size_kb} KB)")
+    return True
+
+
+def _download_tab_fallback(file_id: int, label: str, data_dir: Path) -> bool:
+    """
+    Fallback per i file ingeriti quando format=original non e' disponibile:
+    scarica la derivata .tab. La verifica checksum NON e' applicabile (il
+    checksum del manifest e' quello dell'originale, non della .tab), quindi si
+    controlla solo che il file non sia vuoto. Modalita' degradata: il pacchetto
+    conterra' la derivata invece dell'originale, ma il download non fallisce.
+    """
+    dest = data_dir / label
+    url  = f"{BASE_URL}/api/access/datafile/{file_id}"
+    try:
+        r = get_with_retry(url, stream=True)
+        with open(dest, "wb") as f:
+            for chunk in r.iter_content(chunk_size=8192):
+                f.write(chunk)
+        size_kb = dest.stat().st_size // 1024
+    except Exception as e:
+        print(f"      ERRORE anche sul fallback .tab ({e})")
+        return False
+    if dest.stat().st_size == 0:
+        print("      ERRORE (fallback .tab vuoto)")
+        try:
+            dest.unlink()
+        except OSError:
+            pass
+        return False
+    print(f"      [FALLBACK] salvata derivata .tab ({size_kb} KB, verifica checksum non applicabile): {label}")
     return True
 
 
