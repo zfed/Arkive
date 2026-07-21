@@ -10,6 +10,7 @@ Pipeline automatizzata per trasferire dataset da **Dataverse UNIMI**
 | `scarica_dataverse.py` | Scarica dataset e metadati da Dataverse (tutte le versioni), conserva l'originale depositato dei file ingeriti come tabellari, verifica l'integrità di ogni file (checksum/dimensione) e li organizza in pacchetti compatibili con Archivematica |
 | `archivematica_ingest.py` | Trasferisce e ingesta i pacchetti in Archivematica con approvazione automatica del transfer |
 | `riconcilia_stato.py` | Riconcilia i pacchetti "failed" del file di stato con gli AIP realmente presenti nello Storage Service (es. dopo approvazioni manuali), evitando ingest duplicati |
+| `diagnostica_checksum.py` | *Diagnostica (sola lettura).* Verifica empiricamente, per i file ingeriti come tabellari, se il checksum del manifest si riferisce all'originale o alla derivata `.tab`. Non fa parte del flusso: è lo strumento che documenta la scelta di conservare gli originali e permette di ri-verificarla (nuove versioni Dataverse, audit, altri dataset) |
 
 ## Installazione
 
