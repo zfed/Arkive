@@ -509,8 +509,11 @@ def start_transfer(
     Avvia un Transfer tramite la Dashboard API.
     Restituisce il transfer_uuid.
 
-    transfer_rel_path: path relativo alla radice della Transfer Source,
-                       es. "doi_10.13130_RD_UNIMI_ABC/v1.0"
+    transfer_rel_path: path della cartella da trasferire. Puo' essere ASSOLUTO
+                       (purche' interno alla Transfer Source Location, es.
+                       "/mnt/e/.../TRANSFER_SOURCE/PILOTA/doi_10.13130_...")
+                       oppure RELATIVO alla radice della location
+                       (es. "doi_10.13130_RD_UNIMI_ABC").
     """
     # 1. Recupera il path assoluto della location dallo Storage Service
     source_base = get_transfer_source_path(ss_url, ss_user, ss_key,
@@ -521,8 +524,28 @@ def start_transfer(
             f"{transfer_source_uuid}"
         )
 
-    # 2. Path assoluto completo della cartella da trasferire
-    full_path = f"{source_base}/{transfer_rel_path}"
+    # 2. Path assoluto completo della cartella da trasferire.
+    #    transfer_rel_path puo' essere:
+    #      - ASSOLUTO: necessario quando i pacchetti stanno in una sottocartella
+    #        della location (es. .../TRANSFER_SOURCE/PILOTA/doi_x). Si verifica
+    #        che sia effettivamente interno alla location, altrimenti lo Storage
+    #        Service non potrebbe risolverlo.
+    #      - RELATIVO alla radice della Transfer Source (comportamento storico).
+    _p    = Path(transfer_rel_path)
+    _base = Path(source_base)
+    if _p.is_absolute():
+        try:
+            _p.relative_to(_base)
+        except ValueError:
+            raise RuntimeError(
+                f"Il pacchetto {_p} non si trova dentro la Transfer Source "
+                f"Location {_base}: Archivematica non potrebbe raggiungerlo. "
+                f"Spostare i pacchetti dentro la location oppure usare la "
+                f"location corretta con --transfer-source."
+            )
+        full_path = str(_p)
+    else:
+        full_path = f"{source_base}/{transfer_rel_path}"
     encoded   = _encode_path(transfer_source_uuid, full_path)
 
     print(f"    [debug] Transfer Source base : {source_base}")
@@ -949,7 +972,12 @@ def process_doi_package(
     # Riusa il nome generato in precedenza se il transfer è già stato avviato,
     # altrimenti generane uno nuovo con la data odierna
     transfer_name     = record.get("transfer_name") or make_transfer_name(doi_folder)
-    transfer_rel_path = doi_folder
+    # Path ASSOLUTO del pacchetto, non il solo nome della cartella: i pacchetti
+    # possono trovarsi in una SOTTOCARTELLA della Transfer Source Location
+    # (es. .../TRANSFER_SOURCE/PILOTA/doi_x). Passando solo il nome, il percorso
+    # veniva ricostruito come <radice_location>/<nome> e la sottocartella andava
+    # persa, con errore "Filepath ... does not exist" lato Archivematica.
+    transfer_rel_path = str(doi_path.resolve())
 
     record["transfer_name"] = transfer_name
     record["status"]        = "in_progress"
