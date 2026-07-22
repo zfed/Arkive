@@ -82,30 +82,37 @@ def _headers() -> dict:
     return {"X-Dataverse-key": API_KEY} if API_KEY else {}
 
 
-def _e_404_autentico(r) -> bool:
+def _e_404_autentico(r):
     """
     Distingue un 404 EMESSO DA DATAVERSE (dataset realmente inesistente) da un
     404 spurio prodotto da proxy/WAF/rate-limiting.
 
-    Dataverse risponde con un corpo JSON del tipo:
-        {"status": "ERROR", "message": "Dataset with Persistent ID ... not found."}
-    Un blocco intermedio restituisce invece HTML, corpo vuoto o non-JSON.
+    Restituisce (autentico: bool, messaggio: str|None).
 
-    Questa distinzione e' critica: trattare un 404 spurio come definitivo ha
-    prodotto centinaia di falsi "non raggiungibile" (dataset in realta' vivi).
+    Il discriminante affidabile e' la presenza di un CORPO JSON di Dataverse
+    (`{"status": "ERROR", "message": ...}`): un blocco intermedio restituisce
+    HTML, corpo vuoto o non-JSON, mai il JSON dell'applicazione.
+
+    NB: NON si puo' filtrare sul testo del messaggio. Verificato su
+    dataverse.unimi.it: per un DOI inesistente questa installazione risponde
+        {"status":"ERROR","message":"When accessing a dataset based on
+         Persistent ID, a persistentId query parameter must be present."}
+    cioe' un messaggio fuorviante che non contiene "not found" (difetto noto
+    di alcune versioni Dataverse nella gestione dell'eccezione). Filtrare su
+    "not found" faceva sfuggire le rimozioni reali.
+
     Nel dubbio si considera NON autentico -> si ritenta -> DA_RIVERIFICARE.
     """
     ctype = (r.headers.get("Content-Type") or "").lower()
     if "json" not in ctype:
-        return False
+        return False, None
     try:
         body = r.json()
     except ValueError:
-        return False
-    if not isinstance(body, dict):
-        return False
-    msg = (body.get("message") or "").lower()
-    return body.get("status") == "ERROR" and "not found" in msg
+        return False, None
+    if not isinstance(body, dict) or body.get("status") != "ERROR":
+        return False, None
+    return True, body.get("message")
 
 
 def _get_dataset(doi: str):
@@ -135,8 +142,9 @@ def _get_dataset(doi: str):
                     dettaglio = "200 con corpo non-JSON (probabile pagina proxy)"
 
             elif r.status_code == 404:
-                if _e_404_autentico(r):
-                    return 404, None          # rimozione reale: definitivo
+                autentico, messaggio = _e_404_autentico(r)
+                if autentico:
+                    return 404, messaggio     # rimozione reale: definitivo
                 dettaglio = "404 senza corpo JSON di Dataverse (proxy/rate-limit?)"
 
             elif r.status_code in (401, 403):
@@ -216,7 +224,8 @@ def analizza(doi: str) -> dict:
 
     if status == 404:
         # 404 autentico di Dataverse: il dataset non esiste piu'.
-        return {"doi": doi, "stato": "NON_RAGGIUNGIBILE", "http": 404}
+        return {"doi": doi, "stato": "NON_RAGGIUNGIBILE", "http": 404,
+                "messaggio_server": payload}
     if status in (401, 403):
         return {"doi": doi, "stato": "ACCESSO_NEGATO", "http": status}
     # Esito transitorio (404 spurio, throttling, rete): NON e' una prova di
