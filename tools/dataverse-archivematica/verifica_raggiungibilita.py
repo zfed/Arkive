@@ -10,7 +10,10 @@
 #     - il dataset risponda ancora su Dataverse (non rimosso/deaccessionato)
 #     - sia pubblicato/accessibile (segnala bozze, accesso negato, file ristretti)
 #     - quanti file contiene e QUALE VOLUME avra' la ri-acquisizione con gli
-#       ORIGINALI (usa originalFileSize per gli ingeriti, fileSize altrimenti)
+#       ORIGINALI (usa originalFileSize per gli ingeriti, fileSize altrimenti).
+#       Il conteggio copre TUTTE LE VERSIONI (endpoint /versions), perche' la
+#       pipeline scarica ogni versione in una cartella separata: il volume su
+#       disco e' la somma delle versioni, non quello dell'ultima.
 #
 #   Non cancella e non scrive nulla su Dataverse: esegue solo GET. L'unico file
 #   scritto in locale e' il report JSON (e i DOI non raggiungibili in un .txt).
@@ -118,7 +121,7 @@ def _get_dataset(doi: str):
     """
     if not SSL_VERIFY:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    url = f"{BASE_URL}/api/datasets/:persistentId/"
+    url = f"{BASE_URL}/api/datasets/:persistentId/versions"
     dettaglio = None
     for tentativo in range(1, RETRIES + 1):
         try:
@@ -171,19 +174,43 @@ def analizza(doi: str) -> dict:
     status, payload = _get_dataset(doi)
 
     if status == 200:
-        ver   = payload.get("data", {}).get("latestVersion", {})
-        files = ver.get("files", [])
-        n_ing = sum(1 for f in files
-                    if f.get("dataFile", {}).get("originalFileName")
-                    or f.get("dataFile", {}).get("originalFileFormat"))
-        n_restr = sum(1 for f in files if f.get("restricted"))
-        size_orig = sum(_size_acquisizione(f.get("dataFile", {})) for f in files)
-        size_tab  = sum(_size_tab(f.get("dataFile", {})) for f in files)
-        stato = "OK" if files else "VUOTO"
+        # L'endpoint /versions restituisce la LISTA di tutte le versioni.
+        # La pipeline scarica ogni versione in una cartella separata
+        # (objects/<versione>/objects/), quindi i file si ripetono a ogni
+        # versione: il volume su disco e' la SOMMA su tutte le versioni, non
+        # quello dell'ultima.
+        versioni = payload.get("data", [])
+        if not isinstance(versioni, list):
+            versioni = []
+
+        n_file_tot = n_ing = n_restr = 0
+        size_orig = size_tab = 0
+        for ver in versioni:
+            for f in ver.get("files", []):
+                df = f.get("dataFile", {})
+                n_file_tot += 1
+                if df.get("originalFileName") or df.get("originalFileFormat"):
+                    n_ing += 1
+                if f.get("restricted"):
+                    n_restr += 1
+                size_orig += _size_acquisizione(df)
+                size_tab  += _size_tab(df)
+
+        # Vuoto = nessun file in NESSUNA versione (stesso criterio di
+        # _dataset_has_files() in scarica_dataverse.py).
+        stato = "OK" if n_file_tot else "VUOTO"
+
+        # Dati dell'ultima versione, utili come riferimento rapido.
+        ultima      = versioni[0] if versioni else {}
+        n_file_ult  = len(ultima.get("files", []))
+
         return {
             "doi": doi, "stato": stato,
-            "versionState": ver.get("versionState"),
-            "n_file": len(files), "n_ingeriti": n_ing, "n_ristretti": n_restr,
+            "versionState": ultima.get("versionState"),
+            "n_versioni": len(versioni),
+            "n_file_ultima": n_file_ult,
+            "n_file": n_file_tot,          # totale su tutte le versioni
+            "n_ingeriti": n_ing, "n_ristretti": n_restr,
             "size_acquisizione": size_orig, "size_tab": size_tab,
         }
 
@@ -255,7 +282,8 @@ def main() -> int:
         risultati[doi] = res
         nota = res.get("stato")
         if res.get("stato") in ("OK", "VUOTO"):
-            nota += f"  file={res['n_file']} ingeriti={res['n_ingeriti']}"
+            nota += (f"  ver={res.get('n_versioni', '?')}"
+                     f" file={res['n_file']} ingeriti={res['n_ingeriti']}")
             if res.get("n_ristretti"):
                 nota += f" RISTRETTI={res['n_ristretti']}"
             nota += f"  ~{_fmt_gb(res['size_acquisizione'])}"
@@ -304,8 +332,10 @@ def _riepilogo(risultati: dict) -> None:
     print(f"  ACCESSO NEGATO               : {negato}")
     print(f"  DA RIVERIFICARE (transitori) : {riverif}")
     print(f"  DOI con file RISTRETTI       : {ristretti}")
-    print(f"  Volume ri-acquisizione (orig): {_fmt_gb(tot_size)}")
-    print(f"  Volume attuale (.tab)        : {_fmt_gb(tot_tab)}")
+    print(f"  Versioni totali da scaricare : {sum(r.get('n_versioni', 0) for r in vals)}")
+    print(f"  File totali da scaricare     : {sum(r.get('n_file', 0) for r in vals)}")
+    print(f"  Volume ri-acquisizione (orig): {_fmt_gb(tot_size)}  (tutte le versioni)")
+    print(f"  Volume equivalente in .tab   : {_fmt_gb(tot_tab)}  (tutte le versioni)")
 
     if riverif:
         print(f"\n  {riverif} DOI hanno dato esiti TRANSITORI (404 senza corpo")
