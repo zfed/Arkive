@@ -71,33 +71,88 @@ SSL_VERIFY = os.environ.get("SSL_VERIFY", "true").lower() not in ("false", "0", 
 
 REPORT_PATH   = "reacquisizione_report.json"
 UNREACH_PATH  = "doi_non_raggiungibili.txt"
-RETRIES       = 3
+RETRIES       = 4
+BACKOFF_BASE  = 3      # secondi: attesa = BACKOFF_BASE * tentativo
 
 
 def _headers() -> dict:
     return {"X-Dataverse-key": API_KEY} if API_KEY else {}
 
 
+def _e_404_autentico(r) -> bool:
+    """
+    Distingue un 404 EMESSO DA DATAVERSE (dataset realmente inesistente) da un
+    404 spurio prodotto da proxy/WAF/rate-limiting.
+
+    Dataverse risponde con un corpo JSON del tipo:
+        {"status": "ERROR", "message": "Dataset with Persistent ID ... not found."}
+    Un blocco intermedio restituisce invece HTML, corpo vuoto o non-JSON.
+
+    Questa distinzione e' critica: trattare un 404 spurio come definitivo ha
+    prodotto centinaia di falsi "non raggiungibile" (dataset in realta' vivi).
+    Nel dubbio si considera NON autentico -> si ritenta -> DA_RIVERIFICARE.
+    """
+    ctype = (r.headers.get("Content-Type") or "").lower()
+    if "json" not in ctype:
+        return False
+    try:
+        body = r.json()
+    except ValueError:
+        return False
+    if not isinstance(body, dict):
+        return False
+    msg = (body.get("message") or "").lower()
+    return body.get("status") == "ERROR" and "not found" in msg
+
+
 def _get_dataset(doi: str):
-    """GET del dataset via native API, con qualche retry sui transitori.
-    Restituisce (status_http, json|None)."""
+    """
+    GET del dataset via native API.
+
+    Restituisce (esito, payload) dove esito e':
+      200          -> payload = json del dataset
+      404          -> 404 AUTENTICO di Dataverse (dataset inesistente)
+      401 / 403    -> accesso negato (definitivo)
+      "TRANSITORIO"-> 404 spurio, 429, 5xx o errore di rete dopo tutti i retry
+                      (NON e' una prova di rimozione: va riverificato)
+    """
     if not SSL_VERIFY:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     url = f"{BASE_URL}/api/datasets/:persistentId/"
-    last_exc = None
+    dettaglio = None
     for tentativo in range(1, RETRIES + 1):
         try:
             r = requests.get(url, params={"persistentId": doi}, headers=_headers(),
                              timeout=60, verify=SSL_VERIFY)
+
             if r.status_code == 200:
-                return 200, r.json()
-            # 404/403/... non si ritentano: sono risposte definitive
-            return r.status_code, None
+                try:
+                    return 200, r.json()
+                except ValueError:
+                    dettaglio = "200 con corpo non-JSON (probabile pagina proxy)"
+
+            elif r.status_code == 404:
+                if _e_404_autentico(r):
+                    return 404, None          # rimozione reale: definitivo
+                dettaglio = "404 senza corpo JSON di Dataverse (proxy/rate-limit?)"
+
+            elif r.status_code in (401, 403):
+                return r.status_code, None    # definitivo
+
+            elif r.status_code == 429 or r.status_code >= 500:
+                dettaglio = f"HTTP {r.status_code} (throttling o errore server)"
+
+            else:
+                dettaglio = f"HTTP {r.status_code}"
+
         except requests.exceptions.RequestException as e:
-            last_exc = e
-            if tentativo < RETRIES:
-                time.sleep(2 * tentativo)
-    return None, last_exc
+            dettaglio = f"errore di rete: {e}"
+
+        # Caso transitorio: attesa progressiva e nuovo tentativo
+        if tentativo < RETRIES:
+            time.sleep(BACKOFF_BASE * tentativo)
+
+    return "TRANSITORIO", dettaglio
 
 
 def _size_acquisizione(df: dict) -> int:
@@ -133,12 +188,13 @@ def analizza(doi: str) -> dict:
         }
 
     if status == 404:
+        # 404 autentico di Dataverse: il dataset non esiste piu'.
         return {"doi": doi, "stato": "NON_RAGGIUNGIBILE", "http": 404}
     if status in (401, 403):
         return {"doi": doi, "stato": "ACCESSO_NEGATO", "http": status}
-    if status is None:
-        return {"doi": doi, "stato": "ERRORE_RETE", "dettaglio": str(payload)}
-    return {"doi": doi, "stato": "ERRORE", "http": status}
+    # Esito transitorio (404 spurio, throttling, rete): NON e' una prova di
+    # rimozione. Va riverificato e non entra mai in doi_non_raggiungibili.txt.
+    return {"doi": doi, "stato": "DA_RIVERIFICARE", "dettaglio": str(payload)}
 
 
 def _fmt_gb(n_byte: int) -> str:
@@ -148,10 +204,11 @@ def _fmt_gb(n_byte: int) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("lista", nargs="?", default="dois_scope.txt")
-    ap.add_argument("--sleep", type=float, default=0.0,
-                    help="pausa in secondi tra un DOI e l'altro (cortesia server)")
+    ap.add_argument("--sleep", type=float, default=0.3,
+                    help="pausa in secondi tra un DOI e l'altro (default 0.3, "
+                         "riduce il rischio di rate-limiting su liste lunghe)")
     ap.add_argument("--force", action="store_true",
-                    help="ri-controlla anche i DOI gia' presenti nel report")
+                    help="ri-controlla anche i DOI gia' conclusi nel report")
     args = ap.parse_args()
 
     if not os.path.isfile(args.lista):
@@ -169,7 +226,9 @@ def main() -> int:
     visti = set()
     dois = [d for d in dois if not (d in visti or visti.add(d))]
 
-    # Resume: carica risultati precedenti
+    # Resume: carica risultati precedenti. Gli stati NON definitivi
+    # (DA_RIVERIFICARE) vengono comunque ritentati al run successivo.
+    STATI_DEFINITIVI = ("OK", "VUOTO", "NON_RAGGIUNGIBILE", "ACCESSO_NEGATO")
     risultati: dict = {}
     if os.path.isfile(REPORT_PATH) and not args.force:
         try:
@@ -178,13 +237,19 @@ def main() -> int:
         except Exception:
             risultati = {}
 
+    da_ritentare = sum(1 for r in risultati.values()
+                       if r.get("stato") not in STATI_DEFINITIVI)
+
     print(f"Istanza    : {BASE_URL}")
     print(f"API key    : {'presente' if API_KEY else 'assente'}")
-    print(f"DOI totali : {len(dois)}   (gia' nel report: {len(risultati)})")
+    print(f"DOI totali : {len(dois)}   (gia' conclusi: "
+          f"{len(risultati) - da_ritentare}, da ritentare: {da_ritentare})")
     print("-" * 60)
 
     for i, doi in enumerate(dois, 1):
-        if doi in risultati and not args.force:
+        pregresso = risultati.get(doi)
+        if (pregresso and not args.force
+                and pregresso.get("stato") in STATI_DEFINITIVI):
             continue
         res = analizza(doi)
         risultati[doi] = res
@@ -221,33 +286,39 @@ def _salva(risultati: dict) -> None:
 def _riepilogo(risultati: dict) -> None:
     vals = list(risultati.values())
     def conta(s): return sum(1 for r in vals if r["stato"] == s)
-    ok      = conta("OK")
-    vuoti   = conta("VUOTO")
-    nonragg = conta("NON_RAGGIUNGIBILE")
-    negato  = conta("ACCESSO_NEGATO")
-    errore  = conta("ERRORE") + conta("ERRORE_RETE")
+    ok       = conta("OK")
+    vuoti    = conta("VUOTO")
+    nonragg  = conta("NON_RAGGIUNGIBILE")
+    negato   = conta("ACCESSO_NEGATO")
+    riverif  = conta("DA_RIVERIFICARE")
     tot_size = sum(r.get("size_acquisizione", 0) for r in vals)
     tot_tab  = sum(r.get("size_tab", 0) for r in vals)
     ristretti = sum(1 for r in vals if r.get("n_ristretti"))
 
     print("\n" + "=" * 60)
     print("RIEPILOGO")
-    print(f"  DOI totali analizzati      : {len(vals)}")
-    print(f"  OK (con file)              : {ok}")
-    print(f"  VUOTI (bozza/embargo/nofile): {vuoti}")
-    print(f"  NON RAGGIUNGIBILI          : {nonragg}   -> vedi {UNREACH_PATH}")
-    print(f"  ACCESSO NEGATO             : {negato}")
-    print(f"  ERRORI (rete/altro)        : {errore}")
-    print(f"  DOI con file RISTRETTI      : {ristretti}")
+    print(f"  DOI totali analizzati        : {len(vals)}")
+    print(f"  OK (con file)                : {ok}")
+    print(f"  VUOTI (bozza/embargo/nofile) : {vuoti}")
+    print(f"  NON RAGGIUNGIBILI (404 reale): {nonragg}   -> vedi {UNREACH_PATH}")
+    print(f"  ACCESSO NEGATO               : {negato}")
+    print(f"  DA RIVERIFICARE (transitori) : {riverif}")
+    print(f"  DOI con file RISTRETTI       : {ristretti}")
     print(f"  Volume ri-acquisizione (orig): {_fmt_gb(tot_size)}")
     print(f"  Volume attuale (.tab)        : {_fmt_gb(tot_tab)}")
+
+    if riverif:
+        print(f"\n  {riverif} DOI hanno dato esiti TRANSITORI (404 senza corpo")
+        print("  Dataverse, throttling, rete). NON sono prove di rimozione e non")
+        print("  entrano in " + UNREACH_PATH + ". Rilancia lo strumento per")
+        print("  ritentarli (il resume li riprende in automatico); se restano")
+        print("  molti, aumenta la pausa: --sleep 1")
     if nonragg or negato:
         print("\n  ATTENZIONE: i DOI non raggiungibili / accesso negato vanno")
         print("  valutati a MANO prima di azzerare i rispettivi AIP: potrebbero")
         print("  essere l'unico esemplare rimasto.")
-    if errore:
-        print("\n  Alcuni DOI sono in errore di rete: rilancia lo strumento")
-        print("  (riprende da dove era rimasto) per ritentarli.")
+    if riverif == 0 and (nonragg or negato):
+        print("\n  Nessun esito transitorio pendente: il quadro e' stabile.")
 
 
 if __name__ == "__main__":
