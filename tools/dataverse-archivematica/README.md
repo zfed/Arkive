@@ -142,6 +142,18 @@ Vedi `manuale_dataverse_archivematica.pdf` per il manuale completo.
   essere marcato come "già presente". Questo evita che un file monco entri nel SIP e
   finisca nell'AIP con un checksum PREMIS valido calcolato su un contenuto errato
   (corruzione silenziosa)
+- **Scelte richieste nella processing configuration**: *Perform file format
+  identification (Transfer)* deve essere su **Yes** e *Normalize* su **Normalize
+  for preservation**. Senza identificazione il METS riporta `Unknown` per tutti
+  gli oggetti (niente PUID, niente pianificazione della conservazione) e la
+  normalizzazione non puo' funzionare, perche' il FPR sceglie le regole in base
+  al formato riconosciuto. Il file XML va generato dal Dashboard e non
+  modificato a mano: gli UUID delle catene variano tra versioni di Archivematica
+- **Dove devono stare i pacchetti**: dentro la Transfer Source Location, perche'
+  lo Storage Service risolve solo percorsi interni alla location. Le
+  sottocartelle sono supportate (`--source <location>/LOTTO_01`) ed e' il modo
+  raccomandato di lavorare a lotti: omettendo `--source` viene usata la radice
+  della location, dove lo script raccoglie *tutti* i pacchetti DOI presenti
 - **Fail-fast sul processing config**: se il file XML della processing
   configuration non e' leggibile, `archivematica_ingest.py` si interrompe
   PRIMA di avviare qualunque transfer (senza `processingMCP.xml` i pacchetti

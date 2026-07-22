@@ -339,6 +339,12 @@ rappresentazione di accesso (`.tab`), non necessariamente l'originale che la pip
 conserva: va inteso come copia fedele di ciò che il repository pubblica, non come
 descrizione dell'AIP.
 
+È inoltre presente **solo nella cartella dell'ultima versione**: l'exporter
+Schema.org lavora a livello di dataset e non espone le versioni storiche. La sua
+assenza in `objects/v1.0/metadata/`, `v2.0/metadata/` ecc. **non è un errore**;
+`dataverse.json`, `dcat.json` e `metadata.csv`, generati localmente, ci sono invece
+per ogni versione.
+
 ### Opzioni da riga di comando
 
 | Opzione | Default | Descrizione |
@@ -519,14 +525,63 @@ AM_PROCESSING_MCP_PATH=/home/<utente>/arkive/config/dataverse_001ProcessingMCP.x
 > l'ambiente nelle sessioni shell attive:
 > `export $(grep -v '^#' .env | xargs)`
 
+### Scelte richieste nella processing configuration
+
+Non tutte le scelte sono indifferenti: due incidono direttamente sulla qualita'
+archivistica degli AIP e vanno verificate **prima** di lavorazioni estese.
+
+| Decisione | Valore richiesto | Perche' |
+|---|---|---|
+| Perform file format identification (**Transfer**) | **Yes** | Senza, nessun file viene identificato e il METS riporta `Unknown` per tutti gli oggetti: niente PUID, niente pianificazione della conservazione, niente monitoraggio dell'obsolescenza |
+| Perform file format identification (**Ingest**) | *No, use existing data* | Corretto: riusa i risultati del transfer invece di rifare il lavoro. **Ma vale solo se l'identificazione in fase di transfer e' attiva**: se e' saltata, non esistono dati da riusare |
+| Normalize | **Normalize for preservation** | Genera le derivate di preservazione secondo il FPR. E' Archivematica a doverle produrre, non il repository di origine |
+| Approve normalization | Yes | Altrimenti il processo si ferma in attesa di approvazione manuale, vanificando l'automazione |
+
+Nelle versioni recenti di Archivematica la scelta dello **strumento** di
+identificazione non compare piu' nella processing configuration (l'opzione e'
+solo Yes/No): lo strumento si configura in *Preservation Planning* (FPR). Quale
+sia stato effettivamente usato si legge a posteriori nel METS, negli eventi
+PREMIS di `format identification` (es. `program="Siegfried"; version="1.11.2"`).
+
+**Non modificare l'XML a mano.** Gli UUID delle catene (`goToChain`) variano tra
+versioni di Archivematica: un valore errato produce fallimenti oscuri. Il file va
+generato dal Dashboard (*Administration -> Processing configuration -> Edit ->
+Save -> Download*) e poi copiato nella posizione della copia locale versionata.
+
+Verifica rapida che le due scelte critiche siano attive:
+
+```bash
+CFG=~/arkive/config/dataverse_001ProcessingMCP.xml
+# identificazione in transfer: la goToChain NON deve essere quella di "Skip"
+grep -A2 "f09847c2-ee51-429a-9478-a860477f6b8d" $CFG
+# normalizzazione (due punti di decisione, devono avere la stessa catena)
+grep -A2 "cb8e5706-e73f-472f-ad9b-d1236af8095f" $CFG
+grep -A2 "7509e7dc-1e1b-4dce-8d21-e130515fce73" $CFG
+```
+
+Nota: il file scaricato dal Dashboard **non contiene i commenti** descrittivi
+(`<!-- Normalize: ... -->`) che rendono leggibile la configurazione. La tabella
+qui sopra vale come documentazione delle scelte attese.
+
 ### Opzioni da riga di comando
 
 #### Sorgente e stato
 
 | Opzione | Default | Descrizione |
 |---|---|---|
-| `--source <cartella>` | da Transfer Source | Directory con i pacchetti |
+| `--source <cartella>` | da Transfer Source | Directory con i pacchetti. Deve trovarsi **dentro** la Transfer Source Location; puo' essere una sottocartella (vedi sotto) |
 | `--state-file <file>` | `stato_archivematica.json` | File di tracciamento |
+
+> **Dove devono stare i pacchetti.** Il transfer viene avviato passando ad
+> Archivematica `base64(<location_uuid>:<path_assoluto>)`, e lo Storage Service
+> accetta solo percorsi **interni alla Transfer Source Location**: un pacchetto
+> fuori da li' non viene visto (errore `Filepath ... does not exist`).
+>
+> Le **sottocartelle sono supportate** (es.
+> `<transfer_source>/LOTTO_01/doi_10.13130_...`): basta puntarvi con `--source`.
+> E' il modo raccomandato per lavorare a lotti, perche' `--source` omesso fa
+> usare la radice della location, dove lo script raccoglie **tutti** i pacchetti
+> DOI presenti — comprese lavorazioni precedenti che non si intende ripetere.
 
 #### Dashboard Archivematica
 
@@ -871,6 +926,41 @@ ai vecchi `.tab`. Non è un errore del codice, è la conseguenza del cambio di n
 Prima di rilanciare su cartelle già popolate in passato, svuotarle (o rimuovere i
 `.tab` residui). La migrazione dei pacchetti/AIP già prodotti con i `.tab` è un
 tema a sé, da gestire con una procedura dedicata.
+
+### [ERRORE] start_transfer HTTP 500: Filepath ... does not exist
+
+Archivematica non trova il pacchetto. Cause tipiche:
+
+- il pacchetto **non si trova dentro la Transfer Source Location**: lo Storage
+  Service risolve solo percorsi interni alla location. Spostarlo, oppure indicare
+  la location corretta con `--transfer-source`;
+- permessi insufficienti: l'utente di Archivematica deve poter attraversare tutte
+  le directory del percorso (bit `x` sul gruppo) e leggere il pacchetto.
+
+Il percorso effettivamente inviato compare nel log come `[debug] Full path`:
+confrontarlo con quello reale del pacchetto è il modo più rapido per capire dove
+si perde. Le sottocartelle della location sono supportate.
+
+### Nel METS tutti i file risultano `Unknown`
+
+L'identificazione dei formati non è stata eseguita: verificare le scelte della
+processing configuration (sezione "Scelte richieste nella processing
+configuration"). Il caso tipico è *identificazione in transfer* impostata su
+**Skip** con *identificazione in ingest* su *"No, use existing data"*: la seconda
+non ha dati da riusare, quindi nessun file viene identificato.
+
+Conseguenze: nessun PUID negli oggetti PREMIS, nessuna pianificazione della
+conservazione e nessuna normalizzazione (il FPR seleziona le regole in base al
+formato riconosciuto). Gli AIP prodotti in queste condizioni vanno rifatti.
+
+### I nomi dei file nell'AIP sono diversi da quelli originali
+
+È il comportamento atteso di Archivematica: i nomi contenenti spazi o caratteri
+problematici vengono **sanificati** sul filesystem (`IVD_NMBU shipment 1.xlsx` →
+`IVD_NMBU_shipment_1.xlsx`) e ogni modifica è registrata con un evento PREMIS
+`filename change`. Il nome originale resta documentato nel METS nell'elemento
+`originalName`, quindi l'autenticità è preservata: dall'AIP si risale sempre al
+nome con cui il file è stato depositato.
 
 ### [ERRORE] Impossibile leggere il processing config
 
