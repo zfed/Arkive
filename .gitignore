@@ -31,3 +31,7 @@ tools/dataverse-archivematica/riepilogo_download.json
 tools/dataverse-archivematica/DATASET_TRASFERITI/
 *:Zone.Identifier
 logs/
+
+# Migrazione / ri-acquisizione: stato e report rigenerabili
+tools/dataverse-archivematica/stato_pilota.json
+tools/dataverse-archivematica/reacquisizione_report.json
