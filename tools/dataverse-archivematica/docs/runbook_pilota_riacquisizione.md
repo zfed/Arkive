@@ -469,7 +469,239 @@ ri-acquisizione è **impossibile**, quindi:
    DOI di test rimossi, o altro), che va documentata.
 3. Non includerli nella lista del lotto.
 
-## 9. Criteri di GO / NO-GO per il lotto completo
+## 9. Blocchi durante l'ingest — diagnosi e rimedi
+
+Questi casi si sono presentati tutti durante la calibrazione del primo lotto e
+sono destinati a ripresentarsi su 27 lotti. Vanno riconosciuti in fretta perché,
+a colpo d'occhio, si somigliano molto: lo script attende, il transfer risulta
+`PROCESSING`, e apparentemente "non succede nulla".
+
+### 9.1 Transfer fermo in `USER_INPUT`
+
+Archivematica ha incontrato una decisione **non coperta** dalla
+`processingMCP.xml` e attende una risposta. L'opzione `--auto-approve` gestisce
+solo l'approvazione iniziale del transfer, non le scelte successive.
+
+Il caso riscontrato: un dataset composto da un unico archivio compresso ha fatto
+comparire la domanda **"Extract packages?"**, assente dalla configurazione. La
+soluzione non è rispondere a mano — su 672 pacchetti si ripresenterebbe decine di
+volte — ma **aggiungere la scelta alla processing configuration** e rilanciare.
+
+Impostazione adottata: **Extract packages = Yes**, **Delete packages after
+extraction = No**. In questo modo l'AIP contiene sia l'archivio originale come
+depositato (autenticità) sia il contenuto estratto, identificato, verificato e
+normalizzato (conservazione effettiva). Conservare un archivio non estratto
+significherebbe custodire un oggetto opaco: nessuna identificazione dei formati
+interni, nessun monitoraggio dell'obsolescenza, nessuna normalizzazione possibile.
+
+> **Il `processingMCP.xml` viene letto all'AVVIO del transfer.** Aggiornare la
+> configurazione mentre un transfer è in corso non ha alcun effetto su quel
+> transfer: va annullato e riavviato. Verificare inoltre che il file **dentro il
+> pacchetto** sia quello nuovo (lo script lo ricopia a ogni esecuzione, ma un
+> transfer già avviato usa la copia letta in partenza).
+
+### 9.2 Nessun job avanza: MCPClient disallineato
+
+Sintomo: `[approve] Nessun transfer in attesa trovato` ripetuto, poi
+`[transfer] stato: PROCESSING` all'infinito. In Dashboard il transfer non
+progredisce.
+
+Causa: dopo aver **fermato e riavviato MCPServer** (operazione necessaria per
+pulire le watched directory), MCPClient resta agganciato alla sessione Gearman
+precedente e smette di prelevare i job. Il server li accoda, nessuno li esegue.
+
+L'insidia è che tutti i servizi risultano `active`: il segnale vero è il
+**disallineamento degli orari di avvio** e l'assenza di righe recenti
+`*** RUNNING TASK: ... ***` nel log del client.
+
+```bash
+systemctl status archivematica-mcp-server archivematica-mcp-client gearman-job-server
+sudo journalctl -u archivematica-mcp-client -n 30 --no-pager
+```
+
+**Regola operativa: dopo ogni riavvio di MCPServer, riavviare anche MCPClient.**
+
+```bash
+sudo systemctl start archivematica-mcp-server
+sudo systemctl restart archivematica-mcp-client
+```
+
+### 9.3 Lo script riaggancia un transfer annullato
+
+Sintomo: nel log compare `Transfer UUID (ripresa): <uuid>` seguito da tentativi di
+approvazione che non trovano mai nulla. Lo script non sta avviando un transfer
+nuovo: sta cercando di riprendere quello registrato nel file di stato, che nel
+frattempo è stato annullato dalla Dashboard e quindi non comparirà mai tra i
+transfer in attesa.
+
+È il rovescio del meccanismo di ripresa (`find_transfer_uuid_by_name`), utile dopo
+un timeout di rete ma dannoso quando il transfer è stato eliminato di proposito.
+
+**Rimedio: annullando un transfer dalla Dashboard, rimuovere anche la voce
+corrispondente dal file di stato**, così il DOI riparte da zero.
+
+```bash
+cp stato_riacquisizione.json stato_riacquisizione.json.bak
+python3 - << 'EOF'
+import json
+p='stato_riacquisizione.json'; d=json.load(open(p))
+k='doi_10.13130_RD_UNIMI_XXXXXX'          # adattare
+if k in d:
+    print("rimuovo:", d.pop(k)); json.dump(d, open(p,'w'), indent=2, ensure_ascii=False)
+print("voci rimaste:", len(d))
+EOF
+```
+
+Al rilancio il log deve mostrare `Avvio transfer '...'` con un UUID **nuovo**, non
+più `Transfer UUID (ripresa)`.
+
+### 9.4 Procedura completa di ripartenza pulita
+
+Quando un pacchetto va rifatto da zero, l'ordine conta:
+
+1. interrompere lo script (Ctrl-C: lo stato è già su disco);
+2. annullare il transfer dalla Dashboard;
+3. `sudo systemctl stop archivematica-mcp-server`;
+4. rimuovere le copie residue del pacchetto dalle watched directory
+   (`sudo find /var/archivematica/sharedDirectory/watchedDirectories -maxdepth 3 -name "*<DOI>*"`);
+5. `sudo systemctl start archivematica-mcp-server` **e**
+   `sudo systemctl restart archivematica-mcp-client`;
+6. rimuovere la voce del DOI dal file di stato (9.3);
+7. verificare che il `processingMCP.xml` nel pacchetto sia quello aggiornato;
+8. rilanciare lo stesso comando di ingest.
+
+## 10. Politica di trattamento degli archivi compressi
+
+Questa sezione documenta una **decisione di politica di conservazione**, presa
+durante il pilota sulla base di verifiche empiriche. Va conservata come tale: non
+è un dettaglio di configurazione, ma una scelta che determina la forma degli
+oggetti conservati e che va poter essere motivata in sede di audit.
+
+### 10.1 Il problema
+
+Con `Extract packages = Yes` Archivematica estrae gli archivi e tratta ogni file
+interno come oggetto autonomo. La scelta è stata attivata perché conservare un
+archivio non estratto significa custodire un oggetto **opaco**: nessuna
+identificazione dei formati interni, nessun monitoraggio dell'obsolescenza,
+nessuna normalizzazione possibile.
+
+Il censimento dello scope (`censisci_archivi.py`) ha però mostrato che i file
+riconosciuti come "archivio" appartengono a **due categorie molto diverse**:
+
+| Categoria | Esempi | L'estrazione è… |
+|---|---|---|
+| **Contenitori veri** | `FIBRE.zip`, `Output.zip`, `MARBLE.rar`, `qcr_instances.tgz` | **utile**: dentro c'è una gerarchia di file identificabili |
+| **File singoli compressi** | `*.rds` (serializzazioni R), `*.Rdata`, `*.fastq.gz`, `*.sql.gz` | **dannosa**: produce un blob non utilizzabile |
+
+Un `.rds` non è un contenitore: è il formato nativo di R, compresso con gzip.
+Dataverse ne dichiara il `contentType` come `application/gzip` e Siegfried lo
+identifica come **GZip (PUID `x-fmt/266`)**, quindi la regola di estrazione del
+FPR si attiva.
+
+### 10.2 Verifica empirica
+
+Test su `doi:10.13130/RD_UNIMI/HADWPV` (3 file, di cui un `.rds` da 814 KB), METS
+dell'AIP risultante:
+
+- **1 evento `unpacking`** → il `.rds` è stato effettivamente estratto;
+- tra i formati compare **1 `Unknown`** → il contenuto estratto è la
+  serializzazione R grezza, che nessun registro di formati riconosce;
+- oggetti totali 11 anziché 10.
+
+L'estrazione produce quindi **zero guadagno di conservazione**: da un `.rds`
+valido esce un blob inservibile senza il wrapper. L'originale resta (grazie a
+`Delete packages after extraction = No`), ma accanto vi è un duplicato inutile.
+
+**Impatto sullo scope:** i dataset a base `.rds` sommano circa **11 500 file**
+(`NZRX1C` 6 615, `PLHGBP` 1 620, `UGSD3F` 1 620, `UZ25HQ` 1 080, `V0TP76` 285,
+`1MZNNS` 180 e altri). L'estrazione ne genererebbe circa **23 000** anziché
+11 500, con il relativo tempo di processing e nessun beneficio. Sui `.fastq.gz`
+si aggiungerebbe una forte crescita di spazio, dato che il formato compresso è la
+forma standard di distribuzione dei dati di sequenziamento.
+
+### 10.3 Decisione adottata
+
+**Disabilitare la regola di estrazione per il formato GZip** (FPR →
+*Preservation Planning*, regola UUID `3a19a758-481f-4fdc-9bb4-4052eb150d62`,
+PUID `x-fmt/266`), mantenendo attive quelle per ZIP, 7z, TAR e RAR.
+
+Motivazione da verbale: *l'estrazione dei file GZip a file singolo produce
+oggetti non utilizzabili e non identificabili, senza alcun guadagno di
+conservazione, mentre l'oggetto autentico da preservare è il file compresso
+stesso. I casi in cui la regola danneggia (migliaia di `.rds` e `.fastq.gz`) sono
+largamente prevalenti su quelli in cui gioverebbe (una decina di dataset con veri
+archivi `.tar.gz`).*
+
+**Contropartita accettata:** i veri archivi `.tar.gz`/`.tgz` non vengono più
+estratti e restano conservati come bitstream. Riguarda `T99WYI`, `EIMQRQ`,
+`3QA23K`, `IHTWC0`, `WHRHCT`, `BFQ87D`, `WCZXRK`. Per questi si potrà definire in
+seguito un trattamento dedicato.
+
+> **Da verificare prima di applicare:** come Siegfried identifica un `.tar.gz`.
+> Se lo riconosce come TAR annidato in GZip, disabilitando la regola GZip si
+> perde l'estrazione anche su quei dataset; se esiste una regola TAR autonoma
+> (PUID `x-fmt/265`), continueranno a funzionare e la contropartita si annulla.
+
+### 10.4 Applicazione e verifica
+
+1. In FPR: `Replace` sulla regola → `Enabled: No`. **Disabilitare, non
+   eliminare**: la regola resta tracciata e la scelta è reversibile.
+2. La modifica vale solo per i transfer **avviati dopo**: quelli in corso usano
+   le regole lette in partenza.
+3. Verifica sullo stesso dataset di test: rimuovere la voce dal file di stato,
+   rilanciare l'ingest e controllare che nel METS **non compaia più** l'evento
+   `unpacking` e che il conteggio degli oggetti scenda da 11 a 10.
+4. Gli AIP di prova prodotti prima della modifica vanno rifatti insieme al resto
+   del corpus.
+
+## 11. Piano dei lotti e calibrazione
+
+Lo scope si suddivide con `prepara_lotti.py`, che legge il report di Fase 0 e
+bilancia i lotti su **numero di file e volume**, non sul conteggio dei DOI: il
+corpus è estremamente disomogeneo (da 1 file a quasi 15 000 per dataset) e lotti
+"da N DOI" avrebbero durate imprevedibili.
+
+```bash
+python3 prepara_lotti.py --max-file 2000 --max-gb 20 --max-doi 200 --scrivi
+```
+
+Con queste soglie lo scope dei 672 DOI si ripartisce in **27 lotti**
+(67 730 file, 62,95 GB). La struttura riflette due popolazioni distinte:
+
+- **lotti 01-20**: dominati dal numero di file, quasi tutti un solo DOI (il
+  maggiore ha 14 888 file, il 22% dei file dell'intero corpus);
+- **lotti 21-27**: dominati dal numero di pacchetti (511 DOI per ~2 100 file),
+  dove il costo è quasi tutto overhead per transfer.
+
+**Un solo file di stato per l'intera ri-acquisizione** (`stato_riacquisizione.json`):
+è ciò che impedisce doppi ingest se un DOI comparisse in due lotti o se un lotto
+venisse rilanciato.
+
+### 11.1 Dati di calibrazione misurati
+
+Dal primo lotto reale (111 DOI, 118 file, 2 GB — quasi solo overhead):
+
+| Indicatore | Valore |
+|---|---|
+| Pacchetti completati | 110 su 111 |
+| Tempo totale ingest | 75,5 min |
+| **Media per pacchetto** | **41,6 s** (mediana 40 s, min 25 s, max 251 s) |
+
+Il tempo per pacchetto è dominato dall'attesa di approvazione (10 s) e dal polling
+(intervalli di 15 s), quindi è **indipendente dalla dimensione del pacchetto**.
+Estrapolando sui 672 pacchetti: circa **7,8 ore di solo overhead**, a cui si somma
+il lavoro effettivo sui dataset con molti file.
+
+Ne discende che alzare le soglie per lotto **non allunga i tempi totali** (i
+pacchetti restano 672): riduce solo il numero di cicli manuali. Se le ore di
+polling diventassero un problema, l'unica leva è ridurre gli intervalli in
+`archivematica_ingest.py`, valutando però il carico sulla Dashboard.
+
+Resta da misurare il **costo per file** dentro un pacchetto, con un lotto a
+pacchetto singolo e molti file (es. 1 DOI / ~1 000 file): con i due coefficienti
+si può stimare ogni riga del piano, incluso il lotto oversize.
+
+## 12. Criteri di GO / NO-GO per il lotto completo
 
 Si procede al lotto dei 702 dataset **solo se**:
 
@@ -489,20 +721,28 @@ Si procede al lotto dei 702 dataset **solo se**:
   correttamente. Omettere `--source` farebbe usare la radice della location, con
   il rischio di rilavorare tutti i pacchetti presenti;
 - la **processing configuration** è quella corretta (prerequisito 4.7): un errore
-  qui obbligherebbe a rifare tutti gli AIP del lotto.
+  qui obbligherebbe a rifare tutti gli AIP del lotto;
+- la **politica di trattamento degli archivi** è stata decisa e applicata
+  (sezione 10), e verificata con il test del `.rds`: modificarla a metà
+  lavorazione produrrebbe un corpus disomogeneo, con alcuni AIP contenenti blob
+  estratti e altri no;
+- il **censimento degli archivi** (`censisci_archivi.py`) è completo, senza DOI
+  rimasti non analizzati: i dataset che contengono archivi hanno un carico reale
+  molto superiore a quello dichiarato dall'API e vanno collocati nei lotti di
+  conseguenza.
 
 Nota a favore: la ri-acquisizione è ripartibile in sicurezza. Lo skip si basa su
 dimensione e checksum, quindi rilanciare non lascia file monchi; un download
 interrotto viene ri-scaricato al passaggio successivo.
 
-## 10. Registrazione dell'esito
+## 13. Registrazione dell'esito
 
 Al termine del pilota annotare, per ciascun dataset: data di esecuzione, esito dei
 due Gate, UUID dell'AIP prodotto, anomalie riscontrate e correzioni applicate.
 Questo verbale è la base documentale della ricostruzione del corpus e va conservato
 insieme alla documentazione del progetto.
 
-### 10.1 Esito del pilota del 22 luglio 2026
+### 13.1 Esito del pilota del 22 luglio 2026
 
 **Gate 1 superato** su entrambi i dataset: 36 file scaricati (10 + 26), di cui 31
 come originali (`format=original`) e 5 non ingeriti; nessun `[FALLBACK]`, nessun
@@ -529,3 +769,27 @@ validate. I 25 nomi con spazi risultano sanificati sul filesystem e documentati 
    `uid=333;gid=333;umask=022`, quindi al gruppo manca il bit `w`. Risolto con
    `chmod g+ws` sulla cartella; per il lotto va valutata una soluzione stabile
    (`umask=002` in `/etc/wsl.conf` o riposizionamento della location).
+
+### 13.2 Esito della calibrazione sul primo lotto reale (LOTTO_27)
+
+111 DOI leggeri (118 file, 2 GB): **110 ingeriti, 1 fallito**, 75,5 minuti,
+media 41,6 s per pacchetto (vedi 11.1).
+
+Il caso fallito — un dataset composto da un unico archivio compresso da 610 MB —
+ha fatto emergere tre problemi a catena, tutti documentati nella sezione 9:
+la domanda *Extract packages?* non coperta dalla configurazione (9.1), il
+disallineamento di MCPClient dopo il riavvio di MCPServer (9.2) e il riaggancio
+di un transfer annullato rimasto nel file di stato (9.3).
+
+**Lezione per il lotto completo:** un solo caso su 111 è circa lo 0,9%, che sui
+672 pacchetti significherebbe una sessantina di transfer bloccati. Il censimento
+preventivo con `censisci_archivi.py` ha poi individuato **39 dataset con archivi
+compressi** (12 043 archivi, 11,88 GB), portando alla revisione della politica di
+estrazione documentata nella sezione 10.
+
+Da questo caso è emerso anche che il piano dei lotti **sottostima
+sistematicamente** i dataset contenenti archivi: WPOXS5 risultava «1 file, 0,58
+GB» e ha prodotto **2 238 elementi** nell'AIP (1 859 eventi di `unpacking`),
+perché conteneva un archivio NMR con una gerarchia profonda 10 livelli. I lotti
+che contengono dataset con archivi vanno quindi considerati più pesanti di quanto
+il conteggio dei file suggerisca.
