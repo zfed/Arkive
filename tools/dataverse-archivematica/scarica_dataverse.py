@@ -215,7 +215,19 @@ def _build_headers() -> dict:
 
 
 def get_with_retry(url: str, params: dict = None, stream: bool = False):
-    """GET con retry automatico; rilancia subito su 404."""
+    """
+    GET con retry automatico sugli errori transitori.
+
+    NON ritenta sugli errori client definitivi (4xx tranne 408 e 429): un 400 o
+    un 404 sono risposte stabili del server, ritentarli spreca solo tempo e
+    carico. Fa eccezione il 429 (rate limiting), che e' per sua natura
+    transitorio, e il 408 (request timeout).
+
+    NB: il test sulla presenza della risposta DEVE essere `is not None`.
+    requests.Response implementa __bool__ restituendo self.ok, quindi una
+    risposta 4xx/5xx e' falsy: con `if e.response` lo status non veniva mai
+    letto (compariva "HTTP ?" nei log) e la scorciatoia sui 404 non scattava mai.
+    """
     for attempt in range(1, RETRY_ATTEMPTS + 1):
         try:
             if not _ssl_verify:
@@ -231,10 +243,12 @@ def get_with_retry(url: str, params: dict = None, stream: bool = False):
             r.raise_for_status()
             return r
         except requests.exceptions.HTTPError as e:
-            status = e.response.status_code if e.response else "?"
-            if status == 404:
+            status = e.response.status_code if e.response is not None else None
+            # Errori client definitivi: inutile ritentare, si rilancia subito.
+            if status is not None and 400 <= status < 500 and status not in (408, 429):
                 raise
-            print(f"  [Tentativo {attempt}/{RETRY_ATTEMPTS}] HTTP {status}: {e}")
+            print(f"  [Tentativo {attempt}/{RETRY_ATTEMPTS}] "
+                  f"HTTP {status if status is not None else '?'}: {e}")
         except requests.exceptions.RequestException as e:
             print(f"  [Tentativo {attempt}/{RETRY_ATTEMPTS}] Errore di rete: {e}")
         if attempt < RETRY_ATTEMPTS:
@@ -954,7 +968,9 @@ def process_doi(doi: str, output_root: Path) -> dict:
     try:
         versions = get_all_versions(doi)
     except requests.exceptions.HTTPError as e:
-        msg = f"HTTP {e.response.status_code}" if e.response else str(e)
+        # NB: `is not None` e non `if e.response`: una Response 4xx/5xx e' falsy
+        # (Response.__bool__ restituisce self.ok), quindi il ramo non scattava mai.
+        msg = f"HTTP {e.response.status_code}" if e.response is not None else str(e)
         print(f"  [ERRORE] {msg}")
         result["status"] = "error"
         result["error"]  = msg
