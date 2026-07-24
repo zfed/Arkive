@@ -29,7 +29,9 @@ dataset con l'anomalia nota.
 
 Questo documento descrive la **Fase 1**: l'esecuzione controllata del ciclo
 completo su **due dataset pilota**, allo scopo di validare la procedura prima di
-applicarla ai 702 dataset dello scope. Il prodotto della Fase 1 non è solo "due
+applicarla all'intero scope; la **sezione 15** documenta l'impostazione della
+Fase 2, ossia la lavorazione su workstation dedicata e la successiva migrazione
+degli AIP sull'istanza di produzione. Il prodotto della Fase 1 non è solo "due
 pacchetti corretti", ma **la procedura verificata** da ripetere sul lotto.
 
 ## 2. Esito della Fase 0 (dati di partenza)
@@ -1012,3 +1014,123 @@ GB» e ha prodotto **2 238 elementi** nell'AIP (1 859 eventi di `unpacking`),
 perché conteneva un archivio NMR con una gerarchia profonda 10 livelli. I lotti
 che contengono dataset con archivi vanno quindi considerati più pesanti di quanto
 il conteggio dei file suggerisca.
+
+---
+
+## 15. Fase 2 — Ambiente dedicato e migrazione degli AIP in produzione
+
+### 15.1 Impostazione
+
+La ri-acquisizione completa viene eseguita su una **workstation dedicata**, dove
+Archivematica gira in locale (`localhost`) con risorse sufficienti. Al termine,
+verificata la qualità del risultato, gli AIP prodotti vengono **migrati
+sull'istanza di produzione**.
+
+Questa impostazione ha due conseguenze operative:
+
+- l'istanza sulla workstation va **svuotata completamente** prima di iniziare, per
+  avere un ambiente pulito e dedicato: niente AIP sperimentali, niente job zombie,
+  niente record orfani dalle lavorazioni precedenti;
+- il percorso di migrazione va **verificato in anticipo** su un solo AIP, non
+  scoperto dopo la produzione di centinaia di pacchetti.
+
+### 15.2 Cosa si perde svuotando l'istanza
+
+Lo svuotamento cancella i database MySQL (Dashboard e Storage Service) e gli
+indici Elasticsearch. Con essi spariscono anche configurazioni che sono costate
+lavoro e che **non sono nel repository**:
+
+| Elemento | Dove vive | Come si recupera |
+|---|---|---|
+| **Configurazione FPR** (regola di estrazione GZip disabilitata, format version GZip abilitata) | database Storage Service | **da rifare a mano** e riverificare col test `.rds` (sez. 10.5) |
+| Processing configuration `dataverse_001` | database Dashboard | l'XML è già in `~/arkive/config/`: si reimporta |
+| UUID della Transfer Source Location | database Storage Service | **cambia**: aggiornare il `.env` |
+| UUID della pipeline | database Dashboard | **cambia**: rilevante per la migrazione (sez. 15.5) |
+| API key Dashboard e Storage Service | database | **cambiano**: aggiornare il `.env` |
+
+**Prima di svuotare**, annotare: location definite nello Storage Service (nome,
+purpose, path, UUID), impostazioni FPR modificate, e una copia del `.env`
+corrente.
+
+### 15.3 Ricollocare la Transfer Source fuori da Dropbox
+
+Poiché lo svuotamento impone comunque di **ricreare le location** nello Storage
+Service, è il momento giusto — e a costo nullo — per spostare `TRANSFER_SOURCE`
+fuori dalla cartella sincronizzata con Dropbox. Farlo dopo significherebbe
+rifare la configurazione.
+
+La collocazione naturale è accanto all'`AIPsStore`, che è **già fuori da Dropbox**:
+
+```
+/mnt/e/ARKIVE/AIPsStore/          <- esistente
+/mnt/e/ARKIVE/TRANSFER_SOURCE/    <- nuova collocazione
+```
+
+Vantaggi rispetto alla sospensione manuale della sincronizzazione:
+
+- nessun rischio che Dropbox riprenda da solo dopo un riavvio o un aggiornamento
+  del client, nel mezzo di una lavorazione di ore;
+- nessun caricamento di 63 GB alla riattivazione;
+- meno attrito sui permessi drvfs a ogni lotto (25 cicli).
+
+Se per ragioni proprie si preferisce restare dentro Dropbox, usare la
+**Selective Sync** (esclusione persistente della cartella) e non la sospensione
+manuale, che è uno stato temporaneo.
+
+Resta comunque necessaria l'opzione di mount `metadata` (prerequisito 4.2).
+
+### 15.4 Procedura di ripartenza pulita
+
+1. **Annotare** la configurazione corrente (sez. 15.2) e copiare il `.env`.
+2. **Svuotare** l'istanza Archivematica della workstation.
+3. **Ricreare le location** nello Storage Service, con `TRANSFER_SOURCE` nella
+   nuova collocazione fuori da Dropbox.
+4. **Reimportare** la processing configuration `dataverse_001` e verificarne le
+   scelte (prerequisito 4.7).
+5. **Riapplicare il FPR**: regola di estrazione GZip disabilitata, format version
+   GZip abilitata — e **riverificare col test `.rds`** (sez. 10.5), perché è la
+   configurazione più facile da sbagliare.
+6. **Aggiornare il `.env`** con i nuovi UUID e le nuove API key.
+7. **Test di migrazione su un solo AIP** (sez. 15.5) — prima dei lotti, non dopo.
+8. Avviare la lavorazione dei lotti.
+
+### 15.5 Test di migrazione: un AIP prima di 671
+
+La migrazione si appoggia a `bulk_register_aips.py`, che è esattamente lo
+strumento per questo scenario. Il meccanismo funziona perché il **path a
+quadranti è deterministico dall'UUID**: due istanze Archivematica diverse
+calcolano lo stesso percorso per lo stesso AIP, quindi i pacchetti possono essere
+copiati fra istanze e registrati senza spostamenti fisici (se `origin_path` e
+`current_path` coincidono, la Storage Service registra il record e basta).
+
+Il percorso di migrazione è quindi:
+
+1. copiare i file dell'AIP nell'`AIPsStore` di produzione, rispettando la
+   struttura a quadranti;
+2. registrarli con `bulk_register_aips.py` (variabili `SS_URL`, `SS_USER`,
+   `SS_API_KEY`, `TARGET_LOCATION_UUID`);
+3. rigenerare l'indice Elasticsearch sul Dashboard di produzione
+   (`rebuild_aip_index_from_storage_service`), altrimenti gli AIP risultano
+   registrati ma **invisibili** nella scheda *Archival Storage*;
+4. verificare che l'AIP sia consultabile e che il **pointer file** sia valido.
+
+**Perché farlo subito e su un solo pacchetto:** gli AIP prodotti sulla workstation
+portano con sé l'`origin_pipeline` di quell'istanza, non della produzione, e il
+pointer file viene generato in fase di storage. Se la produzione rifiutasse quei
+record, o se il pointer risultasse malformato, il problema si manifesterebbe
+**identico su tutti i 671 pacchetti**. Scoprirlo dopo venti ore di lavorazione
+comporterebbe rifare tutto.
+
+Si usa uno degli AIP pilota già disponibili: è materiale sacrificabile e
+sufficiente a validare l'intero percorso.
+
+### 15.6 Criterio di chiusura della Fase 2
+
+Si considera la migrazione praticabile quando, sull'AIP di prova:
+
+- il record risulta registrato nella Storage Service di produzione con
+  `status=UPLOADED`;
+- l'AIP compare nella scheda *Archival Storage* del Dashboard dopo la
+  rigenerazione dell'indice;
+- il pointer file è presente e valido;
+- il contenuto è verificabile (fixity, METS leggibile).
