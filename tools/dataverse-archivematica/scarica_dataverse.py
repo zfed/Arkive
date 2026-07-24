@@ -399,13 +399,17 @@ def build_dcat_from_version(doi: str, version: dict) -> str:
         # distribution descrive l'originale (nome, formato, dimensione, URL con
         # format=original). Il checksum del manifest e' gia' quello dell'originale.
         ingested = _is_ingested_tabular(df)
+        # Titolo con il percorso completo: con directoryLabel i soli label
+        # possono ripetersi (un dataset reale ha 2150 file e 41 label univoci),
+        # producendo distribution indistinguibili fra loro.
         if ingested:
-            d_title  = df.get("originalFileName") or label
+            d_title  = _dest_relativa(file_info,
+                                      df.get("originalFileName") or label).as_posix()
             mime     = df.get("originalFileFormat") or df.get("contentType", "")
             size     = df.get("originalFileSize") or df.get("fileSize") or df.get("filesize")
             accessid = f"{BASE_URL}/api/access/datafile/{file_id}?format=original"
         else:
-            d_title  = label
+            d_title  = _dest_relativa(file_info, label).as_posix()
             mime     = df.get("contentType", "")
             size     = df.get("fileSize") or df.get("filesize")
             accessid = f"{BASE_URL}/api/access/datafile/{file_id}"
@@ -518,6 +522,31 @@ def _is_ingested_tabular(df: dict) -> bool:
     return bool(df.get("originalFileName") or df.get("originalFileFormat"))
 
 
+def _dest_relativa(file_info: dict, nome: str) -> Path:
+    """
+    Percorso del file DENTRO objects/, rispettando la struttura a cartelle.
+
+    Dataverse organizza i file in sottocartelle tramite il campo
+    `directoryLabel` (es. "NMR 1h/13C/pdata/1"), mentre `label` e' il solo nome
+    del file. Ignorare directoryLabel appiattisce l'albero e i file omonimi in
+    cartelle diverse SI SOVRASCRIVONO a vicenda: un dataset con 2150 file e 41
+    label univoci lascerebbe su disco 41 file soli, senza alcun errore.
+
+    Oltre alla perdita di dati, va preservata la struttura in se': per molti
+    formati scientifici (dati NMR Bruker/Varian, output strumentali) la
+    gerarchia di cartelle E' parte del dato e senza di essa i file non sono
+    interpretabili.
+
+    Per sicurezza si scartano i segmenti "." e ".." e i percorsi assoluti, che
+    permetterebbero di scrivere fuori dalla cartella di destinazione.
+    """
+    dirlabel = (file_info.get("directoryLabel") or "").strip().strip("/")
+    if not dirlabel:
+        return Path(nome)
+    parti = [seg for seg in dirlabel.split("/") if seg not in ("", ".", "..")]
+    return Path(*parti, nome) if parti else Path(nome)
+
+
 def download_file(file_info: dict, data_dir: Path) -> bool:
     """Scarica un singolo file del dataset. Restituisce True se riuscito."""
     df      = file_info.get("dataFile", {})
@@ -535,12 +564,12 @@ def download_file(file_info: dict, data_dir: Path) -> bool:
     ingested = _is_ingested_tabular(df)
     if ingested:
         orig_name     = df.get("originalFileName") or label
-        dest          = data_dir / orig_name
+        dest          = data_dir / _dest_relativa(file_info, orig_name)
         expected_size = df.get("originalFileSize")
         params        = {"format": "original"}
         etichetta     = f"{orig_name} (originale di {label})"
     else:
-        dest          = data_dir / label
+        dest          = data_dir / _dest_relativa(file_info, label)
         # NB: la dimensione compare come "fileSize" o "filesize" a seconda della
         # versione dell'API (stesso doppio controllo usato per il DCAT).
         expected_size = df.get("fileSize") or df.get("filesize")
@@ -579,6 +608,7 @@ def download_file(file_info: dict, data_dir: Path) -> bool:
     url = f"{BASE_URL}/api/access/datafile/{file_id}"
     print(f"      Scarico: {etichetta} ...", end=" ", flush=True)
     try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
         r = get_with_retry(url, params=params, stream=True)
         with open(dest, "wb") as f:
             for chunk in r.iter_content(chunk_size=8192):
@@ -631,9 +661,10 @@ def _download_tab_fallback(file_id: int, label: str, data_dir: Path) -> bool:
     controlla solo che il file non sia vuoto. Modalita' degradata: il pacchetto
     conterra' la derivata invece dell'originale, ma il download non fallisce.
     """
-    dest = data_dir / label
+    dest = data_dir / _dest_relativa(file_info, label)
     url  = f"{BASE_URL}/api/access/datafile/{file_id}"
     try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
         r = get_with_retry(url, stream=True)
         with open(dest, "wb") as f:
             for chunk in r.iter_content(chunk_size=8192):
@@ -706,8 +737,10 @@ def _write_version_csv(version: dict, data_dir: Path, ver_meta_dir: Path) -> Non
     dc           = _dc_fields_from_version(version)
     subjects_str = dc["subjects"] or ""
 
+    # rglob e non iterdir: i file possono stare in sottocartelle (directoryLabel)
     files_in_objects = sorted(
-        [f.name for f in data_dir.iterdir() if f.is_file()]
+        [f.relative_to(data_dir).as_posix()
+         for f in data_dir.rglob("*") if f.is_file()]
     ) if data_dir.exists() else []
 
     fieldnames = ["filename", "dc.title", "dc.creator", "dc.date", "dc.description",
@@ -744,8 +777,10 @@ def write_archivematica_metadata(versions: list[dict], doi_dir: Path,
         dc    = _dc_fields_from_version(version)
 
         objects_dir      = doi_dir / "objects" / vtag / "objects"
+        # rglob e non iterdir: i file possono stare in sottocartelle (directoryLabel)
         files_in_objects = sorted(
-            [f.name for f in objects_dir.iterdir() if f.is_file()]
+            [f.relative_to(objects_dir).as_posix()
+             for f in objects_dir.rglob("*") if f.is_file()]
         ) if objects_dir.exists() else []
 
         targets = ([f"objects/{vtag}/objects/{fname}" for fname in files_in_objects]

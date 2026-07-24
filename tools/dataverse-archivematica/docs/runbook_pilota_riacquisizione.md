@@ -270,6 +270,33 @@ espone le versioni storiche. La sua assenza nelle versioni precedenti **non è u
 errore di export**. Da verificare invece se mancasse in modo irregolare (per
 esempio assente anche nell'ultima versione, o presente a intermittenza).
 
+**6.4bis Il numero di file su disco corrisponde a quello atteso.** È il
+controllo che intercetta la perdita silenziosa di dati: un file scaricato e poi
+sovrascritto non produce alcun errore, quindi exit code, log e assenza di `.tab`
+possono essere tutti verdi mentre mancano migliaia di oggetti. L'unico modo di
+accorgersene è confrontare i file effettivamente presenti con quelli dichiarati
+dall'API (report di Fase 0):
+
+```bash
+python3 trova_da_riscaricare.py        # sola lettura: elenca i pacchetti incompleti
+```
+
+Atteso: *Pacchetti INCOMPLETI: 0*. Se qualcuno risulta incompleto, va
+ri-scaricato prima dell'ingest (vedi nota sotto). Questo controllo è emerso come
+necessario dopo un caso reale: un dataset con 2 150 file organizzati in 171
+sottocartelle (`directoryLabel`) ne aveva su disco solo 41 — i file omonimi in
+cartelle diverse si erano sovrascritti a vicenda. Con un batch di DOI il
+controllo va fatto sull'intero scope, non solo sul pilota.
+
+> **Nota — `directoryLabel` e struttura a cartelle.** Dataverse organizza i file
+> in sottocartelle tramite il campo `directoryLabel`. La pipeline deve
+> riprodurle: per molti formati scientifici (dati NMR Bruker/Varian, output
+> strumentali) la gerarchia di cartelle *è* parte del dato. `metadata.csv` deve
+> a sua volta elencare i file annidati, altrimenti il SIP risulta incompleto.
+> `trova_da_riscaricare.py --elimina` rimuove le cartelle dei pacchetti
+> incompleti; un successivo download le ricostruisce da zero (necessario perché
+> i file gia' presenti in posizione piatta resterebbero come residui).
+
 **6.5 I file ristretti sono stati scaricati (Pilota B).** Contro il rischio del
 pacchetto silenziosamente incompleto: il numero di file di dati presenti su disco
 deve corrispondere a quello atteso dal report di Fase 0.
