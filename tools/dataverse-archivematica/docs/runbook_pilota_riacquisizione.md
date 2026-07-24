@@ -747,17 +747,52 @@ Questa soluzione non lascia nulla sul tavolo: i `.rds` restano intatti e i
 
 ### 10.5 Applicazione e verifica
 
-1. In FPR (*Preservation planning -> Format policy registry -> Rules*): `Replace`
-   sulla regola GZip -> `Enabled: No`. **Disabilitare, non eliminare**: resta
-   tracciata e la scelta è reversibile.
+> **Attenzione: nel FPR "format version" e "rule" sono due cose diverse**, e la
+> schermata si somiglia. Entrambe mostrano `Description / Enabled / Actions`, ma:
+>
+> - `/fpr/format/gzip/...` è la **definizione del formato** (format version):
+>   serve a riconoscere il PUID. Disabilitarla fa diventare `Unknown` **tutti** i
+>   file di quel formato — nel nostro corpus circa 11 500 `.rds` e `.fastq.gz`
+>   perderebbero il PUID.
+> - `/fpr/fprule/extract/` è l'elenco delle **regole di estrazione**: è qui che si
+>   disabilita l'unpacking, senza toccare l'identificazione.
+>
+> L'errore è stato commesso durante il pilota: disabilitando la format version
+> l'estrazione effettivamente cessava, ma il `.rds` risultava `Unknown` nel METS.
+
+**Configurazione corretta:**
+
+| Voce | Percorso | Stato |
+|---|---|---|
+| Format version **GZip** (`x-fmt/266`) | `/fpr/format/gzip/` | **Enabled** — conserva il PUID |
+| **Regola di estrazione** GZip | `/fpr/fprule/extract/` | **Disabled** — niente unpacking |
+| Regole di estrazione ZIP, 7z, TAR, RAR | `/fpr/fprule/extract/` | Enabled |
+
+**Verifica eseguita** (dataset `HADWPV`, contiene un `.rds`), METS dell'AIP:
+
+- nessun evento `unpacking`;
+- `piste_background_buffer_5_10.rds` -> **`GZip  x-fmt/266`** (non più `Unknown`);
+- oggetti scesi da 11 a 10.
+
+Comandi di verifica:
+
+```bash
+rm -f /tmp/stato_test_rds.json
+python3 archivematica_ingest.py --source "$TS_PATH/TEST_RDS" --auto-approve \
+  --state-file /tmp/stato_test_rds.json
+# poi, sull'AIP prodotto, elencare formato e PUID di ogni oggetto dal METS
+```
+
+**Altre note operative:**
+
+1. **Disabilitare, non eliminare**: la voce resta tracciata e la scelta è
+   reversibile.
 2. La modifica vale solo per i transfer **avviati dopo**: quelli in corso usano le
    regole lette in partenza.
-3. Verifica sul dataset di test `HADWPV` (contiene un `.rds`): rimuovere la voce
-   dal file di stato, rilanciare l'ingest e controllare che nel METS **non
-   compaia più** l'evento `unpacking` e che gli oggetti scendano da 11 a 10.
-4. Al momento del lotto dedicato: riattivare la regola, lavorare i 7 dataset,
-   verificare la presenza di **GZip e TAR** tra i formati, quindi ridisabilitarla.
-5. Gli AIP di prova prodotti prima della modifica vanno rifatti insieme al resto
+3. Per il **lotto dedicato** ai `.tgz` va riabilitata la **sola regola di
+   estrazione**, non la format version (che resta sempre abilitata). Al termine
+   va ridisabilitata.
+4. Gli AIP di prova prodotti prima della modifica vanno rifatti insieme al resto
    del corpus.
 
 ## 11. Export dei metadati per versione: limite noto dell'istanza
@@ -852,10 +887,11 @@ Si procede al lotto dei 702 dataset **solo se**:
   il rischio di rilavorare tutti i pacchetti presenti;
 - la **processing configuration** è quella corretta (prerequisito 4.7): un errore
   qui obbligherebbe a rifare tutti gli AIP del lotto;
-- la **politica di trattamento degli archivi** è stata decisa e applicata
-  (sezione 10), applicata e verificata con il test del `.rds`: modificarla a metà
-  lavorazione produrrebbe un corpus disomogeneo, con alcuni AIP contenenti blob
-  estratti e altri no;
+- la **politica di trattamento degli archivi** è stata decisa, applicata e
+  verificata con il test del `.rds` (sezione 10.5): regola di estrazione GZip
+  disabilitata, format version GZip **abilitata**. Modificarla a metà lavorazione
+  produrrebbe un corpus disomogeneo, con alcuni AIP contenenti blob estratti e
+  altri no, o con PUID mancanti;
 - il **censimento degli archivi** (`censisci_archivi.py`) è completo, senza DOI
   rimasti non analizzati: i dataset che contengono archivi hanno un carico reale
   molto superiore a quello dichiarato dall'API e vanno collocati nei lotti di
