@@ -619,42 +619,111 @@ valido esce un blob inservibile senza il wrapper. L'originale resta (grazie a
 si aggiungerebbe una forte crescita di spazio, dato che il formato compresso è la
 forma standard di distribuzione dei dati di sequenziamento.
 
-### 10.3 Decisione adottata
+### 10.3 Verifica del doppio passaggio sui `.tar.gz`
 
-**Disabilitare la regola di estrazione per il formato GZip** (FPR →
-*Preservation Planning*, regola UUID `3a19a758-481f-4fdc-9bb4-4052eb150d62`,
-PUID `x-fmt/266`), mantenendo attive quelle per ZIP, 7z, TAR e RAR.
+Prima di decidere è stato accertato **come Archivematica tratta i veri archivi
+`.tar.gz`**, perché da questo dipende la portata della scelta.
 
-Motivazione da verbale: *l'estrazione dei file GZip a file singolo produce
-oggetti non utilizzabili e non identificabili, senza alcun guadagno di
-conservazione, mentre l'oggetto autentico da preservare è il file compresso
-stesso. I casi in cui la regola danneggia (migliaia di `.rds` e `.fastq.gz`) sono
-largamente prevalenti su quelli in cui gioverebbe (una decina di dataset con veri
-archivi `.tar.gz`).*
+**Siegfried non distingue i due casi.** Su un `.tar.gz` contenente una directory e
+su un banale `.txt.gz`, l'identificazione è identica:
 
-**Contropartita accettata:** i veri archivi `.tar.gz`/`.tgz` non vengono più
-estratti e restano conservati come bitstream. Riguarda `T99WYI`, `EIMQRQ`,
-`3QA23K`, `IHTWC0`, `WHRHCT`, `BFQ87D`, `WCZXRK`. Per questi si potrà definire in
-seguito un trattamento dedicato.
+```
+id: x-fmt/266   format: GZIP Format   basis: extension match gz; byte match at 0, 3
+```
 
-> **Da verificare prima di applicare:** come Siegfried identifica un `.tar.gz`.
-> Se lo riconosce come TAR annidato in GZip, disabilitando la regola GZip si
-> perde l'estrazione anche su quei dataset; se esiste una regola TAR autonoma
-> (PUID `x-fmt/265`), continueranno a funzionare e la contropartita si annulla.
+È una conseguenza strutturale del formato: gzip comprime un flusso singolo e la
+sua signature sta nei primi byte; cosa contenga si scopre solo decomprimendo.
+**Nessuna regola FPR può separare i due casi**, perché il FPR ragiona per PUID e
+il PUID è lo stesso.
 
-### 10.4 Applicazione e verifica
+**L'estrazione avviene però in due passaggi.** Test su
+`doi:10.13130/RD_UNIMI/IHTWC0` (4 versioni, un `.tar.gz` da 17,9 MB ciascuna),
+METS dell'AIP risultante:
 
-1. In FPR: `Replace` sulla regola → `Enabled: No`. **Disabilitare, non
-   eliminare**: la regola resta tracciata e la scelta è reversibile.
-2. La modifica vale solo per i transfer **avviati dopo**: quelli in corso usano
-   le regole lette in partenza.
-3. Verifica sullo stesso dataset di test: rimuovere la voce dal file di stato,
-   rilanciare l'ingest e controllare che nel METS **non compaia più** l'evento
-   `unpacking` e che il conteggio degli oggetti scenda da 11 a 10.
-4. Gli AIP di prova prodotti prima della modifica vanno rifatti insieme al resto
+- formati: **4 GZip** *e* **4 TAR** — uno per versione;
+- percorsi annidati che documentano la catena:
+  `STSWSN-PC_INSTANCES.tar-1.gz-<timestamp1>/STSWSN-PC_INSTANCES.tar-<timestamp2>/STSWSN-PC_INSTANCES/graph100_8_2.txt`
+  (prima la regola GZip `x-fmt/266`, poi la regola TAR `x-fmt/265`);
+- **405 file Plain Text** estratti e identificati singolarmente.
+
+Ne consegue che disabilitando la regola GZip **la catena si ferma al primo passo**:
+la regola TAR resta attiva ma non viene mai raggiunta, e i `.tar.gz` non vengono
+estratti affatto.
+
+Il test ha mostrato anche il **fattore di moltiplicazione**: 16 file dichiarati
+dall'API hanno prodotto **465 oggetti** nell'AIP (29×).
+
+### 10.4 Decisione adottata: configurazione differenziata a due lotti
+
+Poiché nessuna regola può distinguere i due casi, la scelta è **differenziare per
+lotto** anziché per formato:
+
+| Fase | Regola GZip `x-fmt/266` | Dataset |
+|---|---|---|
+| **Lotto generale** | **disabilitata** | 665 dataset: nessun blob inutile sugli ~11 500 `.rds` e `.fastq.gz` |
+| **Lotto dedicato agli archivi tar** | **riattivata** | 7 dataset: `T99WYI`, `EIMQRQ`, `3QA23K`, `IHTWC0`, `WHRHCT`, `BFQ87D`, `WCZXRK` — estrazione completa in due passaggi |
+
+Motivazione da verbale: *l'estrazione dei file GZip a file singolo produce oggetti
+non utilizzabili e non identificabili, senza guadagno di conservazione, mentre
+l'oggetto autentico da preservare è il file compresso stesso. Poiché Siegfried non
+può distinguere un file singolo compresso da un archivio tar compresso (stesso
+PUID `x-fmt/266`), la regola di estrazione viene disabilitata per la lavorazione
+generale e riattivata per il solo lotto dei dataset che contengono veri archivi
+tar, verificati uno per uno.*
+
+Questa soluzione non lascia nulla sul tavolo: i `.rds` restano intatti e i
+`.tar.gz` vengono comunque estratti.
+
+> **Vincolo di sequenzialità.** La regola FPR è globale: quando è riattivata vale
+> per **qualunque** transfer in corso. Il lotto dedicato va quindi lavorato da
+> solo, accertandosi che nessun altro lotto sia in lavorazione, e la regola va
+> ridisabilitata subito dopo.
+
+> **Da mettere a verbale:** la configurazione FPR **non è stata uniforme** su
+> tutto il corpus, ma differenziata consapevolmente per categoria di dataset. È
+> una scelta legittima e documentabile, purché appunto documentata: senza questa
+> nota, in sede di audit apparirebbe come un'incoerenza.
+
+### 10.5 Applicazione e verifica
+
+1. In FPR (*Preservation planning -> Format policy registry -> Rules*): `Replace`
+   sulla regola GZip -> `Enabled: No`. **Disabilitare, non eliminare**: resta
+   tracciata e la scelta è reversibile.
+2. La modifica vale solo per i transfer **avviati dopo**: quelli in corso usano le
+   regole lette in partenza.
+3. Verifica sul dataset di test `HADWPV` (contiene un `.rds`): rimuovere la voce
+   dal file di stato, rilanciare l'ingest e controllare che nel METS **non
+   compaia più** l'evento `unpacking` e che gli oggetti scendano da 11 a 10.
+4. Al momento del lotto dedicato: riattivare la regola, lavorare i 7 dataset,
+   verificare la presenza di **GZip e TAR** tra i formati, quindi ridisabilitarla.
+5. Gli AIP di prova prodotti prima della modifica vanno rifatti insieme al resto
    del corpus.
 
-## 11. Piano dei lotti e calibrazione
+## 11. Export dei metadati per versione: limite noto dell'istanza
+
+Durante i test è emerso che l'endpoint `/api/datasets/export` di
+`dataverse.unimi.it` **rifiuta il parametro `version`**: per ogni versione non
+corrente risponde `400 Bad Request`.
+
+```
+HTTP 400 ... /api/datasets/export?exporter=dataverse_json&persistentId=...&version=1.0
+[ATTENZIONE] Export dataverse_json non riuscito
+```
+
+Su un dataset con 4 versioni, gli export riescono solo per l'ultima (`v1.3`) e
+falliscono per `v1.0`, `v1.1`, `v1.2`. È la ragione tecnica per cui `schema.json`
+è presente solo nella cartella dell'ultima versione (cfr. manuale).
+
+**Conseguenza operativa da valutare prima del lotto completo:** lo script esegue
+**3 tentativi con retry** per ogni export fallito, cioè 6 chiamate inutili per
+versione (due exporter). Sulle 1 226 versioni dello scope sono diverse migliaia di
+richieste sprecate, che allungano i tempi e caricano inutilmente il server.
+
+Poiché un `400` è un errore **definitivo** e non transitorio, non andrebbe
+ritentato. La correzione è circoscritta a `scarica_dataverse.py` e conviene
+applicarla prima della lavorazione estesa.
+
+## 12. Piano dei lotti e calibrazione
 
 Lo scope si suddivide con `prepara_lotti.py`, che legge il report di Fase 0 e
 bilancia i lotti su **numero di file e volume**, non sul conteggio dei DOI: il
@@ -677,7 +746,7 @@ Con queste soglie lo scope dei 672 DOI si ripartisce in **27 lotti**
 è ciò che impedisce doppi ingest se un DOI comparisse in due lotti o se un lotto
 venisse rilanciato.
 
-### 11.1 Dati di calibrazione misurati
+### 12.1 Dati di calibrazione misurati
 
 Dal primo lotto reale (111 DOI, 118 file, 2 GB — quasi solo overhead):
 
@@ -701,7 +770,7 @@ Resta da misurare il **costo per file** dentro un pacchetto, con un lotto a
 pacchetto singolo e molti file (es. 1 DOI / ~1 000 file): con i due coefficienti
 si può stimare ogni riga del piano, incluso il lotto oversize.
 
-## 12. Criteri di GO / NO-GO per il lotto completo
+## 13. Criteri di GO / NO-GO per il lotto completo
 
 Si procede al lotto dei 702 dataset **solo se**:
 
@@ -723,26 +792,29 @@ Si procede al lotto dei 702 dataset **solo se**:
 - la **processing configuration** è quella corretta (prerequisito 4.7): un errore
   qui obbligherebbe a rifare tutti gli AIP del lotto;
 - la **politica di trattamento degli archivi** è stata decisa e applicata
-  (sezione 10), e verificata con il test del `.rds`: modificarla a metà
+  (sezione 10), applicata e verificata con il test del `.rds`: modificarla a metà
   lavorazione produrrebbe un corpus disomogeneo, con alcuni AIP contenenti blob
   estratti e altri no;
 - il **censimento degli archivi** (`censisci_archivi.py`) è completo, senza DOI
   rimasti non analizzati: i dataset che contengono archivi hanno un carico reale
   molto superiore a quello dichiarato dall'API e vanno collocati nei lotti di
-  conseguenza.
+  conseguenza;
+- i **7 dataset con archivi tar** sono stati estratti dal piano generale e
+  raccolti in un **lotto dedicato** da lavorare separatamente con la regola GZip
+  riattivata (sezione 10.4).
 
 Nota a favore: la ri-acquisizione è ripartibile in sicurezza. Lo skip si basa su
 dimensione e checksum, quindi rilanciare non lascia file monchi; un download
 interrotto viene ri-scaricato al passaggio successivo.
 
-## 13. Registrazione dell'esito
+## 14. Registrazione dell'esito
 
 Al termine del pilota annotare, per ciascun dataset: data di esecuzione, esito dei
 due Gate, UUID dell'AIP prodotto, anomalie riscontrate e correzioni applicate.
 Questo verbale è la base documentale della ricostruzione del corpus e va conservato
 insieme alla documentazione del progetto.
 
-### 13.1 Esito del pilota del 22 luglio 2026
+### 14.1 Esito del pilota del 22 luglio 2026
 
 **Gate 1 superato** su entrambi i dataset: 36 file scaricati (10 + 26), di cui 31
 come originali (`format=original`) e 5 non ingeriti; nessun `[FALLBACK]`, nessun
@@ -770,10 +842,10 @@ validate. I 25 nomi con spazi risultano sanificati sul filesystem e documentati 
    `chmod g+ws` sulla cartella; per il lotto va valutata una soluzione stabile
    (`umask=002` in `/etc/wsl.conf` o riposizionamento della location).
 
-### 13.2 Esito della calibrazione sul primo lotto reale (LOTTO_27)
+### 14.2 Esito della calibrazione sul primo lotto reale (LOTTO_27)
 
 111 DOI leggeri (118 file, 2 GB): **110 ingeriti, 1 fallito**, 75,5 minuti,
-media 41,6 s per pacchetto (vedi 11.1).
+media 41,6 s per pacchetto (vedi 12.1).
 
 Il caso fallito — un dataset composto da un unico archivio compresso da 610 MB —
 ha fatto emergere tre problemi a catena, tutti documentati nella sezione 9:
