@@ -38,17 +38,19 @@ La ricognizione con `verifica_raggiungibilita.py` sui 708 DOI dello scope ha dat
 
 | Indicatore | Valore |
 |---|---|
-| DOI ri-acquisibili (OK) | **672** |
+| DOI ri-acquisibili (OK) | **671** |
 | DOI vuoti (nessun file in nessuna versione) | 30 |
-| DOI **non più raggiungibili** su Dataverse | **6** |
+| DOI **non più raggiungibili** su Dataverse | **7** |
 | DOI con file ad accesso ristretto | 111 |
 | Versioni totali da scaricare | 1 226 |
 | File totali da scaricare | 67 730 |
 | Volume stimato (originali, tutte le versioni) | **62,95 GB** |
 
-I 6 DOI non più raggiungibili — `QA4BRO`, `BX8AIN`, `YF2NZV`, `WKMYTV`, `YIAURF`,
-`OYDM83` — sono **fuori dallo scope della ri-acquisizione** e vanno trattati a
-mano: vedi sezione 8.
+I 7 DOI non più raggiungibili — `QA4BRO`, `BX8AIN`, `YF2NZV`, `WKMYTV`, `YIAURF`,
+`OYDM83`, `ZYY5RK` — sono **fuori dallo scope della ri-acquisizione** e vanno
+trattati a mano: vedi sezione 8. Il settimo (`ZYY5RK`) risultava disponibile in
+Fase 0 ed è scomparso durante la lavorazione: lo scope va riverificato lotto per
+lotto (sezione 8.2).
 
 ## 3. Dataset pilota selezionati
 
@@ -453,21 +455,80 @@ EOF
 
 **7.2.5 Fixity.** Nessun evento PREMIS di *fixity check* fallito.
 
-## 8. I 6 DOI non più raggiungibili
+## 8. I 7 DOI non più raggiungibili
 
-`QA4BRO`, `BX8AIN`, `YF2NZV`, `WKMYTV`, `YIAURF`, `OYDM83` non esistono più su
-`dataverse.unimi.it` (verificato via API, browser e `curl`). Per questi la
-ri-acquisizione è **impossibile**, quindi:
+`QA4BRO`, `BX8AIN`, `YF2NZV`, `WKMYTV`, `YIAURF`, `OYDM83` e `ZYY5RK` non esistono
+più su `dataverse.unimi.it`. Per questi la ri-acquisizione è **impossibile**,
+quindi:
 
 1. **Prima di qualunque pulizia**, verificare se ne esiste una copia locale (nelle
    cartelle di download o negli AIP già prodotti) e, in caso affermativo,
    **metterla al sicuro fuori dall'area di lavoro**: sarebbe l'unico esemplare
    rimasto.
-2. **Segnalare la scomparsa ai responsabili di Data@UNIMI.** Sei dataset
+2. **Segnalare la scomparsa ai responsabili di Data@UNIMI.** Sette dataset
    pubblicati con DOI assegnato che spariscono da un repository certificato
    CoreTrustSeal richiedono una spiegazione (deaccession su richiesta dell'autore,
-   DOI di test rimossi, o altro), che va documentata.
-3. Non includerli nella lista del lotto.
+   DOI di test rimossi, o altro), che va documentata. Nel browser tutti e sette
+   restituiscono *"Page Not Found"* e non una pagina di deaccession: si tratta
+   quindi di **eliminazione**, non di ritiro tracciato.
+3. Non includerli nelle liste dei lotti.
+
+### 8.1 Come si accerta che un DOI è davvero scomparso
+
+**Un 404 isolato non è una prova.** Sotto rate limiting `dataverse.unimi.it`
+risponde `404` con lo **stesso identico corpo JSON** di un dataset realmente
+inesistente:
+
+```json
+{"status":"ERROR","message":"When accessing a dataset based on Persistent ID,
+ a persistentId query parameter must be present."}
+```
+
+I due casi sono **indistinguibili per contenuto**: stesso status, stesso
+content-type, stesso messaggio. La prova è che `JMKSAW`, che è vivo e da cui
+abbiamo scaricato migliaia di file, interrogato in raffica risponde `404` con quel
+corpo e interrogato in isolamento risponde `200`.
+
+L'unico discriminante affidabile è la **ripetizione con pausa**: un dataset
+inesistente risponde 404 a ogni tentativo, il throttling cede. Gli strumenti
+`verifica_raggiungibilita.py` e `censisci_archivi.py` dichiarano perciò un
+dataset irraggiungibile solo se il 404 si ripete su **tutti** i tentativi.
+
+Verifica manuale di conferma, prima di dichiarare perso un dataset:
+
+```bash
+set -a; source .env; set +a
+for i in 1 2 3; do
+  sleep 6
+  curl -s -o /tmp/z.txt -w "tentativo $i -> HTTP %{http_code}\n" \
+    -H "X-Dataverse-key: ${DATAVERSE_API_KEY}" \
+    "https://dataverse.unimi.it/api/datasets/:persistentId/versions?persistentId=<DOI>"
+done
+```
+
+Tre `404` con pause di 6 secondi, più il controllo nel browser, sono la
+combinazione che è stata usata per accertare i sette casi.
+
+> **Prima applicazione del criterio sbagliato:** con la regola iniziale
+> («404 + corpo JSON di Dataverse = rimozione») il censimento aveva classificato
+> come irraggiungibili **28 DOI**, di cui 22 erano falsi positivi da throttling,
+> compreso `VHW2QV` con 2 544 file. È il motivo per cui il criterio è stato
+> corretto.
+
+### 8.2 Lo scope va riverificato, non dato per acquisito
+
+`ZYY5RK` risultava `OK` con 3 file nella ricognizione di Fase 0 ed è scomparso
+**nell'arco di due giorni**, durante la lavorazione stessa. Lo scope non è quindi
+un dato stabile: conviene **riverificare i DOI di ogni lotto poco prima di
+lavorarlo**, invece di fidarsi di una ricognizione fatta una volta sola.
+
+Quando un DOI risulta perso a piano già generato, va rimosso dalle liste:
+
+```bash
+grep -l "<SIGLA>" lotti/*.txt
+sed -i '/<SIGLA>/d' lotti/*.txt
+echo "doi:10.13130/RD_UNIMI/<SIGLA>" >> doi_non_raggiungibili.txt
+```
 
 ## 9. Blocchi durante l'ingest — diagnosi e rimedi
 
@@ -799,6 +860,9 @@ Si procede al lotto dei 702 dataset **solo se**:
   rimasti non analizzati: i dataset che contengono archivi hanno un carico reale
   molto superiore a quello dichiarato dall'API e vanno collocati nei lotti di
   conseguenza;
+- i DOI del lotto sono stati **riverificati poco prima di lavorarlo** (sezione
+  8.2): lo scope non è stabile, un dataset è scomparso nell'arco di due giorni
+  durante la lavorazione stessa;
 - i **7 dataset con archivi tar** sono stati estratti dal piano generale e
   raccolti in un **lotto dedicato** da lavorare separatamente con la regola GZip
   riattivata (sezione 10.4).
