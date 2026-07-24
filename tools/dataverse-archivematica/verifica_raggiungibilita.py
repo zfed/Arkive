@@ -121,15 +121,25 @@ def _get_dataset(doi: str):
 
     Restituisce (esito, payload) dove esito e':
       200          -> payload = json del dataset
-      404          -> 404 AUTENTICO di Dataverse (dataset inesistente)
+      404          -> 404 CONFERMATO su tutti i tentativi (dataset inesistente)
       401 / 403    -> accesso negato (definitivo)
-      "TRANSITORIO"-> 404 spurio, 429, 5xx o errore di rete dopo tutti i retry
+      "TRANSITORIO"-> 429, 5xx, errore di rete o 404 non confermato
                       (NON e' una prova di rimozione: va riverificato)
+
+    NB sul 404: un 404 da rate limiting e' INDISTINGUIBILE per contenuto da un
+    404 reale. Verificato su dataverse.unimi.it: sotto throttling il server
+    risponde 404 con lo stesso corpo JSON ("...a persistentId query parameter
+    must be present") anche per dataset esistenti. L'unico discriminante
+    affidabile e' la RIPETIZIONE con pausa: un dataset davvero inesistente
+    risponde 404 a ogni tentativo, il throttling cede. Il 404 e' quindi
+    definitivo solo se confermato su TUTTI i tentativi.
     """
     if not SSL_VERIFY:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     url = f"{BASE_URL}/api/datasets/:persistentId/versions"
     dettaglio = None
+    n_404 = 0
+    messaggio_404 = None
     for tentativo in range(1, RETRIES + 1):
         try:
             r = requests.get(url, params={"persistentId": doi}, headers=_headers(),
@@ -142,10 +152,11 @@ def _get_dataset(doi: str):
                     dettaglio = "200 con corpo non-JSON (probabile pagina proxy)"
 
             elif r.status_code == 404:
-                autentico, messaggio = _e_404_autentico(r)
-                if autentico:
-                    return 404, messaggio     # rimozione reale: definitivo
-                dettaglio = "404 senza corpo JSON di Dataverse (proxy/rate-limit?)"
+                # Non decidibile al primo colpo: si conta e si ritenta.
+                n_404 += 1
+                _, messaggio = _e_404_autentico(r)
+                messaggio_404 = messaggio or messaggio_404
+                dettaglio = "404 (da confermare con i tentativi successivi)"
 
             elif r.status_code in (401, 403):
                 return r.status_code, None    # definitivo
@@ -163,6 +174,9 @@ def _get_dataset(doi: str):
         if tentativo < RETRIES:
             time.sleep(BACKOFF_BASE * tentativo)
 
+    # 404 su TUTTI i tentativi: si considera un dataset realmente inesistente.
+    if n_404 == RETRIES:
+        return 404, messaggio_404
     return "TRANSITORIO", dettaglio
 
 

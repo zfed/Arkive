@@ -100,11 +100,22 @@ def _e_archivio(df: dict, label: str) -> bool:
 
 
 def _get_versioni(doi: str):
-    """GET /versions con retry sui transitori. Ritorna (esito, payload)."""
+    """
+    GET /versions con retry sui transitori. Ritorna (esito, payload).
+
+    NB sul 404: un 404 da rate limiting e' INDISTINGUIBILE per contenuto da un
+    404 reale (stesso status, stesso corpo JSON di Dataverse, stesso messaggio
+    "a persistentId query parameter must be present"). L'unico discriminante
+    affidabile e' la RIPETIZIONE con pausa: un dataset davvero inesistente
+    risponde 404 a ogni tentativo, mentre il throttling cede.
+    Il 404 viene quindi dichiarato definitivo solo se si ripete su TUTTI i
+    tentativi; se un tentativo successivo va a buon fine, vince quello.
+    """
     if not SSL_VERIFY:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     url = f"{BASE_URL}/api/datasets/:persistentId/versions"
     dettaglio = None
+    n_404 = 0
     for tentativo in range(1, RETRIES + 1):
         try:
             r = requests.get(url, params={"persistentId": doi}, headers=_headers(),
@@ -115,10 +126,8 @@ def _get_versioni(doi: str):
                 except ValueError:
                     dettaglio = "200 con corpo non-JSON"
             elif r.status_code == 404:
-                ctype = (r.headers.get("Content-Type") or "").lower()
-                if "json" in ctype:
-                    return 404, None      # dataset inesistente: definitivo
-                dettaglio = "404 senza corpo JSON (proxy/rate-limit?)"
+                n_404 += 1
+                dettaglio = "404 ripetuto"
             elif r.status_code in (401, 403):
                 return r.status_code, None
             else:
@@ -127,6 +136,10 @@ def _get_versioni(doi: str):
             dettaglio = f"errore di rete: {e}"
         if tentativo < RETRIES:
             time.sleep(BACKOFF_BASE * tentativo)
+
+    # 404 su TUTTI i tentativi: si considera un dataset realmente inesistente.
+    if n_404 == RETRIES:
+        return 404, None
     return "TRANSITORIO", dettaglio
 
 
