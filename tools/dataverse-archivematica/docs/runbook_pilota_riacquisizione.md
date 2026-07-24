@@ -844,7 +844,10 @@ venisse rilanciato.
 
 ### 12.1 Dati di calibrazione misurati
 
-Dal primo lotto reale (111 DOI, 118 file, 2 GB — quasi solo overhead):
+La calibrazione è stata fatta su **due lotti dal profilo opposto**, per isolare le
+due componenti di costo: l'overhead fisso per pacchetto e il lavoro per file.
+
+**LOTTO_27 — 111 DOI, 118 file, 2 GB** (quasi solo overhead):
 
 | Indicatore | Valore |
 |---|---|
@@ -852,19 +855,45 @@ Dal primo lotto reale (111 DOI, 118 file, 2 GB — quasi solo overhead):
 | Tempo totale ingest | 75,5 min |
 | **Media per pacchetto** | **41,6 s** (mediana 40 s, min 25 s, max 251 s) |
 
+**LOTTO_14 — 1 DOI, 1 036 file, 0,03 GB** (un solo pacchetto, molti file):
+
+| Fase | Tempo | Coefficiente |
+|---|---|---|
+| Download | 3 min 19 s | **0,19 s/file** |
+| Ingest | 4 min 30 s (di cui 41,6 s di overhead) | **0,22 s/file** |
+
 Il tempo per pacchetto è dominato dall'attesa di approvazione (10 s) e dal polling
-(intervalli di 15 s), quindi è **indipendente dalla dimensione del pacchetto**.
-Estrapolando sui 672 pacchetti: circa **7,8 ore di solo overhead**, a cui si somma
-il lavoro effettivo sui dataset con molti file.
+(intervalli di 15 s), quindi è **indipendente dalla dimensione del pacchetto**. Nel
+download l'83% del tempo è attesa di rete (`user`+`sys` = 32 s su 199): il collo di
+bottiglia è la latenza per richiesta, non la macchina.
 
-Ne discende che alzare le soglie per lotto **non allunga i tempi totali** (i
-pacchetti restano 672): riduce solo il numero di cicli manuali. Se le ore di
-polling diventassero un problema, l'unica leva è ridurre gli intervalli in
-`archivematica_ingest.py`, valutando però il carico sulla Dashboard.
+### 12.2 Stima dell'intera ri-acquisizione
 
-Resta da misurare il **costo per file** dentro un pacchetto, con un lotto a
-pacchetto singolo e molti file (es. 1 DOI / ~1 000 file): con i due coefficienti
-si può stimare ogni riga del piano, incluso il lotto oversize.
+| Componente | Calcolo | Tempo |
+|---|---|---|
+| Download | 67 730 file x 0,19 s | ~3,6 h |
+| Ingest — overhead pacchetti | 671 x 41,6 s | ~7,8 h |
+| Ingest — lavoro sui file | 67 730 x 0,22 s | ~4,1 h |
+| **Totale processing** | | **~15,5 h** |
+
+A cui si aggiunge il tempo dei Gate fra un lotto e l'altro, che dipende
+dall'operatore e non dalla macchina.
+
+**Margine di incertezza da dichiarare:** i coefficienti sono misurati su file
+minuscoli (il LOTTO_14 pesa 0,03 GB), quindi catturano la latenza ma non la banda.
+Sui 63 GB reali — con casi come un `.dta` da 235 MB o un `.tar` da 2,4 GB — il
+tempo di trasferimento effettivo si somma. Stima realistica: **18-20 ore**,
+distribuite su più sessioni.
+
+Due conseguenze per la pianificazione:
+
+- **l'overhead per pacchetto domina** (7,8 h su 15,5). È il costo fisso dei 671
+  transfer, indipendente dalla loro dimensione: alzare le soglie per lotto non
+  allunga i tempi totali, riduce solo il numero di cicli manuali. L'unica leva per
+  ridurlo sarebbe abbassare gli intervalli di polling in
+  `archivematica_ingest.py`, valutando però il carico sulla Dashboard;
+- il **lotto oversize da 14 888 file** si stima in circa **1,7 h** complessive
+  (47 min di download, 55 min di ingest): pesante ma gestibile in una sessione.
 
 ## 13. Criteri di GO / NO-GO per il lotto completo
 
@@ -941,6 +970,24 @@ validate. I 25 nomi con spazi risultano sanificati sul filesystem e documentati 
    `uid=333;gid=333;umask=022`, quindi al gruppo manca il bit `w`. Risolto con
    `chmod g+ws` sulla cartella; per il lotto va valutata una soluzione stabile
    (`umask=002` in `/etc/wsl.conf` o riposizionamento della location).
+
+### 14.3 Esito del LOTTO_14 (calibrazione del costo per file)
+
+1 DOI, 4 versioni, **1 036 file** (0,03 GB), nessun archivio compresso.
+
+- Download: **1 036 file su 1 036**, zero errori, nessun `[FALLBACK]`, nessun
+  `.tab` su disco — 3 min 19 s.
+- Ingest: completato senza errori — 4 min 30 s. AIP
+  `23bbfdf9-a35e-4ed4-9b22-c8bcad142635`.
+
+È il secondo lotto reale registrato in `stato_riacquisizione.json` e ha fornito il
+coefficiente di costo per file (sezione 12.1), completando la stima complessiva
+della ri-acquisizione.
+
+Nota strutturale emersa: le 4 versioni contengono 259 file ciascuna, cioè lo
+stesso contenuto scaricato quattro volte. È il comportamento atteso della
+struttura per versione (`objects/<versione>/objects/`) e spiega perché il
+conteggio dei file del piano è più alto di quanto i dataset sembrino contenere.
 
 ### 14.2 Esito della calibrazione sul primo lotto reale (LOTTO_27)
 
