@@ -281,21 +281,57 @@ dall'API (report di Fase 0):
 python3 trova_da_riscaricare.py        # sola lettura: elenca i pacchetti incompleti
 ```
 
-Atteso: *Pacchetti INCOMPLETI: 0*. Se qualcuno risulta incompleto, va
-ri-scaricato prima dell'ingest (vedi nota sotto). Questo controllo è emerso come
-necessario dopo un caso reale: un dataset con 2 150 file organizzati in 171
-sottocartelle (`directoryLabel`) ne aveva su disco solo 41 — i file omonimi in
-cartelle diverse si erano sovrascritti a vicenda. Con un batch di DOI il
-controllo va fatto sull'intero scope, non solo sul pilota.
+Atteso: *Pacchetti INCOMPLETI: 0*. Con un batch di DOI il controllo va fatto
+sull'intero scope, non solo sul pilota — e non basta guardare i pacchetti
+presenti: va confrontato anche l'elenco dei DOI su disco con lo scope atteso,
+perché un pacchetto **del tutto assente** non verrebbe segnalato da un
+confronto che guarda solo ciò che c'è (vedi 6.4ter).
 
-> **Nota — `directoryLabel` e struttura a cartelle.** Dataverse organizza i file
-> in sottocartelle tramite il campo `directoryLabel`. La pipeline deve
-> riprodurle: per molti formati scientifici (dati NMR Bruker/Varian, output
-> strumentali) la gerarchia di cartelle *è* parte del dato. `metadata.csv` deve
-> a sua volta elencare i file annidati, altrimenti il SIP risulta incompleto.
-> `trova_da_riscaricare.py --elimina` rimuove le cartelle dei pacchetti
-> incompleti; un successivo download le ricostruisce da zero (necessario perché
-> i file gia' presenti in posizione piatta resterebbero come residui).
+### 6.4bis.1 Le quattro classi di perdita silenziosa (casi reali)
+
+Durante la ri-acquisizione dell'intero corpus sono emersi **quattro** meccanismi
+distinti per cui file scaricati con successo sparivano su disco senza produrre
+alcun errore. Sono documentati perché tutti invisibili ai controlli standard
+(exit code, log, assenza di `.tab`) e costosi da riscoprire.
+
+| # | Meccanismo | Sintomo | Come si risolve |
+|---|---|---|---|
+| 1 | **`directoryLabel` ignorato** | file omonimi in sottocartelle diverse appiattiti nella stessa directory, si sovrascrivono | la destinazione rispetta `directoryLabel` (caso reale: 2 150 file → 41 su disco, dati NMR) |
+| 2 | **file non scaricati (rete)** | timeout puntuale su singoli file in download senza retry di lotto | ri-scaricare: la verifica di integrità recupera i mancanti (caso reale: 2 `.tif` su XJSHSK) |
+| 3 | **`originalFileName` condiviso** | due file tabellari distinti con lo stesso nome originale, il secondo sovrascrive | disambiguazione: il file collidente va in una sottocartella col `label` (univoco) |
+| 4 | **filesystem case-insensitive** | drvfs/NTFS fonde `KLC1.tif` e `klc1.tif`, per Dataverse distinti | stessa disambiguazione, con confronto dei percorsi in minuscolo |
+
+I meccanismi 1, 3 e 4 sono varianti della stessa idea — **una collisione di nome
+che sovrascrive in silenzio** — su tre assi diversi (sottocartelle, nome
+originale, maiuscole/minuscole). Sono gestiti nello stesso punto di
+`download_file`, che colloca il file collidente in una sottocartella con il
+`label`, univoco nella versione. `metadata.csv` raccoglie i file annidati via
+`rglob`, altrimenti il SIP risulterebbe incompleto.
+
+> **Nota infrastrutturale.** Il meccanismo 4 non è un difetto del codice ma del
+> filesystem di destinazione: la case-insensitivity di drvfs/NTFS. La
+> disambiguazione lo aggira, ma un archivio di preservazione dovrebbe risiedere
+> su un filesystem **case-sensitive** (ext4), dove due file legittimi che
+> differiscono solo per il case possono coesistere allo stesso livello senza
+> artifici. È un argomento — insieme a quello su Dropbox — per collocare il
+> corpus fuori da drvfs (sezione 15.3).
+
+### 6.4ter Nessun pacchetto è assente dallo scope
+
+`trova_da_riscaricare.py` confronta i file su disco con quelli attesi **per i DOI
+che trova**: un DOI la cui cartella non esiste affatto non verrebbe contato. Serve
+quindi un secondo controllo, che confronta l'elenco dei DOI presenti con lo scope:
+
+```bash
+python3 trova_da_riscaricare.py     # pacchetti presenti ma incompleti
+# e il confronto con lo scope atteso: DOI presenti vs 671 attesi
+```
+
+Questo controllo è emerso necessario dopo un caso reale: 17 pacchetti eliminati
+per essere ri-scaricati non erano stati ripresi da un ciclo di download
+successivo, e `trova_da_riscaricare.py` riportava «INCOMPLETI: 0» perché quei DOI
+non erano più su disco da confrontare — una discrepanza invisibile finché non si
+è confrontato il totale dei DOI presenti (654) con lo scope atteso (671).
 
 **6.5 I file ristretti sono stati scaricati (Pilota B).** Contro il rischio del
 pacchetto silenziosamente incompleto: il numero di file di dati presenti su disco
@@ -1105,6 +1141,17 @@ Se per ragioni proprie si preferisce restare dentro Dropbox, usare la
 manuale, che è uno stato temporaneo.
 
 Resta comunque necessaria l'opzione di mount `metadata` (prerequisito 4.2).
+
+> **Non solo Dropbox: anche il tipo di filesystem.** drvfs espone il filesystem
+> Windows/NTFS, che è **case-insensitive**: due file che differiscono solo per
+> maiuscole/minuscole (`KLC1.tif` e `klc1.tif`) vengono fusi in uno solo. Durante
+> la ri-acquisizione questo ha causato perdita di dati (sezione 6.4bis.1, caso 4),
+> aggirata con una disambiguazione in sottocartelle. Per un archivio di
+> preservazione la collocazione ideale è un filesystem **case-sensitive** (ext4
+> nativo di WSL, es. sotto `/home` o un disco dedicato), dove il problema non si
+> pone. È una decisione infrastrutturale da valutare con Giorgio e Matteo:
+> pesa il beneficio (fedeltà al deposito, nessun artificio di disambiguazione)
+> contro il costo (i 63 GB non sono più su `/mnt/e/` accessibile da Windows).
 
 ### 15.4 Procedura di ripartenza pulita
 

@@ -258,6 +258,41 @@ verifica del checksum non è applicabile: si controlla solo che il file non sia 
 I file **non** ingeriti (PDF, ZIP, immagini, e ogni file non tabellare) non hanno un
 originale distinto: vengono scaricati e verificati come sempre, senza `format=original`.
 
+### Struttura a cartelle e unicità dei nomi
+
+Il nome con cui un file viene salvato su disco deve riprodurre fedelmente la sua
+identità in Dataverse, ed evitare che due file distinti finiscano sullo stesso
+percorso. Sono tre le insidie, tutte fonte di **perdita silenziosa** (il file
+sovrascritto sparisce senza errore):
+
+1. **`directoryLabel`** — Dataverse organizza i file in sottocartelle tramite
+   questo campo (es. `NMR 1h/13C/pdata/1`). La pipeline lo rispetta: ignorarlo
+   appiattirebbe l'albero e i file omonimi in cartelle diverse si
+   sovrascriverebbero. Preservare la struttura non è un dettaglio estetico —
+   per molti formati scientifici (dati NMR Bruker/Varian, output strumentali) la
+   gerarchia di cartelle *è* parte del dato e senza di essa i file non sono
+   interpretabili.
+2. **`originalFileName` non univoco** — due file tabellari distinti possono
+   condividere lo stesso `originalFileName` (con `label` diversi). Poiché
+   l'originale si salva con quel nome, il secondo sovrascriverebbe il primo.
+3. **filesystem case-insensitive** — su drvfs/NTFS `KLC1.tif` e `klc1.tif` sono
+   lo stesso file; il secondo sovrascrive il primo pur essendo, per Dataverse,
+   file distinti.
+
+Nei casi 2 e 3 la pipeline **disambigua**: quando il percorso calcolato collide
+con uno già assegnato nella stessa versione (confronto condotto in minuscolo, per
+coprire anche il caso 3), il file viene collocato in una sottocartella che porta
+il `label`, che Dataverse garantisce univoco. La disambiguazione avviene prima
+dello skip-se-esiste ed è deterministica, così il resume non crea doppioni.
+`metadata.csv` elenca i file annidati (via `rglob`), altrimenti il SIP
+risulterebbe incompleto.
+
+Il controllo che intercetta questa classe di errori è il confronto fra numero di
+file su disco e numero atteso dai metadati dell'API, applicato **per versione**:
+è l'unico che rileva una sovrascrittura, dato che download e verifica di
+integrità riportano comunque successo. Lo strumento `trova_da_riscaricare.py`
+automatizza il confronto sull'intero scope.
+
 ### Verifica di integrità dei file
 
 Ogni file scaricato viene confrontato con i metadati di integrità che Dataverse
