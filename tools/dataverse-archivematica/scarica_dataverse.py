@@ -547,7 +547,8 @@ def _dest_relativa(file_info: dict, nome: str) -> Path:
     return Path(*parti, nome) if parti else Path(nome)
 
 
-def download_file(file_info: dict, data_dir: Path) -> bool:
+def download_file(file_info: dict, data_dir: Path,
+                  percorsi_usati: set = None) -> bool:
     """Scarica un singolo file del dataset. Restituisce True se riuscito."""
     df      = file_info.get("dataFile", {})
     file_id = df.get("id")
@@ -579,6 +580,28 @@ def download_file(file_info: dict, data_dir: Path) -> bool:
     # Per gli ingeriti il checksum del manifest si riferisce all'originale
     # (verificato empiricamente): e' quindi autoritativo su entrambi i rami.
     expected_hash, algo = _expected_checksum(df)
+
+    # ── Disambiguazione dei nomi collidenti ─────────────────────────────────
+    # Il nome su disco puo' collidere con quello di un altro file della stessa
+    # versione, per due ragioni:
+    #   (a) originalFileName non e' univoco: due file tabellari distinti possono
+    #       condividerlo (due label diversi con lo stesso originalFileName);
+    #   (b) il filesystem di destinazione e' CASE-INSENSITIVE: su drvfs/NTFS
+    #       "S1B KLC1 1M.tif" e "S1B klc1 1M.tif" sono lo stesso file e il
+    #       secondo sovrascrive il primo, anche se per Dataverse sono distinti.
+    # In entrambi i casi il secondo file verrebbe perso in silenzio, o lo
+    # skip-se-esiste lo scambierebbe per gia' scaricato. Il label e' invece
+    # univoco nella versione: se il percorso (confrontato in minuscolo, per
+    # coprire il caso (b)) risulta gia' assegnato, si disambigua inserendo il
+    # label come sottocartella. Va fatto PRIMA dello skip.
+    if percorsi_usati is not None:
+        rel = dest.relative_to(data_dir)
+        if str(rel).lower() in percorsi_usati:
+            base_label = re.sub(r'[^\w.-]', '_', label)
+            dest = data_dir / rel.parent / base_label / rel.name
+            print(f"      [collisione nome] '{label}' disambiguato in "
+                  f"{dest.relative_to(data_dir)}")
+        percorsi_usati.add(str(dest.relative_to(data_dir)).lower())
 
     # ── Decisione di SKIP su file gia' presente ─────────────────────────────
     # La dimensione attesa e' il controllo di skip primario: il troncamento si
@@ -964,8 +987,9 @@ def process_version(doi: str, version: dict, doi_dir: Path,
         print(f"    [data] Nessun file in questa versione.")
     else:
         print(f"    [data] {len(files)} file trovati, inizio download...")
+        percorsi_usati = set()   # percorsi gia' assegnati in questa versione
         for file_info in files:
-            ok = download_file(file_info, data_dir)
+            ok = download_file(file_info, data_dir, percorsi_usati)
             if ok:
                 result["files_ok"] += 1
             else:
