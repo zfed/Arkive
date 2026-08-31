@@ -1,0 +1,20 @@
+# AIP doppioni/scartati da NON migrare (il file di stato punta all'altro UUID)
+U3WU1R  scarta c198869d-8dc5-4974-9d2d-4ac8c90f00d5  (tieni f7dfba30)  # doppio transfer da timeout
+HADWPV  scarta 852bf89f-40ea-431f-baa6-1b8e5ac0bc20  (DEL_REQ, AIP di test)
+NZRX1C  scarta 4535bf1e-4eb2-46f1-a02a-55879327a614  (tieni a4420421)  # sequenze parallele
+
+# Doppioni rilevati al Gate finale 2026-07-30
+0FMO7S  scarta 70e5f10b-bd69-4209-98cd-dfe779b8e4f6
+1MZNNS  scarta 4d9ba303-22e6-4ae4-b1cc-9613088896e6
+2HB4WC  scarta d6154856-31dc-4ce5-a6d0-af34854254c4
+9K2STO  scarta 6e09cf06-6c53-4f57-bcdd-6fcd00bcf228
+H4UDYV  scarta e05841e5-247d-46df-a63b-8bedcfa22c38
+H4W0JR  scarta 91c61ce5-8071-4355-8846-3c158b994783
+KUPJTU  scarta 522ad3b0-b0d4-41ec-a60d-525f3961cf87
+NWMWSL  scarta 331bb360-d7e5-46bc-a335-1e8560eb5be6
+NZRX1C  scarta 4535bf1e-4eb2-46f1-a02a-55879327a614
+QJ6XRY  scarta 6fc60e7a-7f82-470c-a47d-2065aac0207e
+U3WU1R  scarta c198869d-8dc5-4974-9d2d-4ac8c90f00d5
+UI9ECN  scarta 4ecd0303-cbd3-4f55-bf87-858a96c4436d
+UZ25HQ  scarta b03cc783-975d-437b-8995-4fd3b58f49cd
+VR2DHX  scarta 94dbe1b4-4636-45ff-8cf1-1da354322e73

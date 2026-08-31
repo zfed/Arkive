@@ -35,3 +35,17 @@ logs/
 # Migrazione / ri-acquisizione: stato e report rigenerabili
 tools/dataverse-archivematica/stato_pilota.json
 tools/dataverse-archivematica/reacquisizione_report.json
+
+# --- Fase 2: ri-acquisizione (stato, backup e report rigenerabili) ---
+# Il file di stato e tutti i suoi backup/varianti temporali
+tools/dataverse-archivematica/stato_riacquisizione.json
+tools/dataverse-archivematica/stato_riacquisizione.json.*
+# Report degli archivi (rigenerabili dagli script)
+tools/dataverse-archivematica/archivi_report.json
+tools/dataverse-archivematica/archivi_report.json.*
+# Backup generici e file di stato temporanei ovunque nella cartella tool
+tools/dataverse-archivematica/*.bak
+tools/dataverse-archivematica/*.bak_*
+tools/dataverse-archivematica/*.pre-wipe
+# Liste dei lotti generate (se non si vogliono versionare)
+tools/dataverse-archivematica/lotti/

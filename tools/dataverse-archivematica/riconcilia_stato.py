@@ -2,7 +2,7 @@
 """
 riconcilia_stato.py
 -------------------
-Riconcilia il file di stato (stato_archivematica.json) con lo Storage
+Riconcilia il file di stato (default stato_riacquisizione.json) con lo Storage
 Service di Archivematica: per i pacchetti marcati "failed" il cui ingest
 è in realtà andato a buon fine (es. approvazione manuale dopo un timeout
 dello script), recupera l'AIP UUID reale dallo Storage Service e aggiorna
@@ -33,7 +33,7 @@ Uso:
   python3 riconcilia_stato.py --dois H4W0JR,NZRX1C
 
   # file di stato in un percorso diverso
-  python3 riconcilia_stato.py --state-file /percorso/stato_archivematica.json
+  python3 riconcilia_stato.py --state-file /percorso/stato_riacquisizione.json
 
 Prima di ogni scrittura viene creato automaticamente un backup:
   <state-file>.bak_<YYYYMMDD>_<HHMMSS>
@@ -139,9 +139,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=("Riconcilia i pacchetti 'failed' del file di stato con "
                      "gli AIP realmente presenti nello Storage Service."))
-    parser.add_argument("--state-file", default="stato_archivematica.json",
+    parser.add_argument("--state-file", default="stato_riacquisizione.json",
         help="File di stato da riconciliare "
-             "(default: stato_archivematica.json)")
+             "(default: stato_riacquisizione.json)")
     parser.add_argument("--dois", default="",
         help="Frammenti di DOI da riconciliare, separati da virgola "
              "(default: tutti i pacchetti 'failed' nel file di stato)")
