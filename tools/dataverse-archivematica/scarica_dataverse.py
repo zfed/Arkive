@@ -644,7 +644,7 @@ def download_file(file_info: dict, data_dir: Path,
         # nessun file. La verifica checksum non e' applicabile alla .tab.
         if ingested:
             print(f"ATTENZIONE (originale non disponibile: {e}) -> fallback .tab")
-            return _download_tab_fallback(file_id, label, data_dir)
+            return _download_tab_fallback(file_info, file_id, label, data_dir)
         print(f"ERRORE ({e})")
         return False
 
@@ -676,7 +676,8 @@ def download_file(file_info: dict, data_dir: Path,
     return True
 
 
-def _download_tab_fallback(file_id: int, label: str, data_dir: Path) -> bool:
+def _download_tab_fallback(file_info: dict, file_id: int, label: str,
+                           data_dir: Path) -> bool:
     """
     Fallback per i file ingeriti quando format=original non e' disponibile:
     scarica la derivata .tab. La verifica checksum NON e' applicabile (il
