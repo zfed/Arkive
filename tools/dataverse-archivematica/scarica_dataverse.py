@@ -1024,6 +1024,7 @@ def process_doi(doi: str, output_root: Path) -> dict:
         "versions":     [],
         "error":        None,
         "empty_reason": None,
+        "bozze_escluse": 0,
     }
 
     doi_dir = output_root / sanitize(doi)
@@ -1045,6 +1046,24 @@ def process_doi(doi: str, output_root: Path) -> dict:
         result["status"] = "error"
         result["error"]  = str(e)
         return result
+
+    # ── Bozze escluse ─────────────────────────────────────────────────────────
+    # Con la API key l'endpoint /versions restituisce anche l'eventuale bozza
+    # (versionState DRAFT, senza numero di versione): non e' una versione
+    # pubblicata e non va conservata. Senza questo filtro finirebbe in v0.0.
+    bozze    = [v for v in versions if v.get("versionState") == "DRAFT"]
+    versions = [v for v in versions if v.get("versionState") != "DRAFT"]
+    result["bozze_escluse"] = len(bozze)
+    if bozze:
+        print(f"  [INFO] Bozza (DRAFT) presente: esclusa dal download.")
+
+    # Versioni ritirate: trattamento ancora da decidere (spec. punto 5).
+    # Per ora sono elaborate come le altre, ma segnalate a log.
+    for v in versions:
+        if v.get("versionState") == "DEACCESSIONED":
+            print(f"  [AVVISO] Versione "
+                  f"{version_tag(v.get('versionNumber', 0), v.get('versionMinorNumber', 0))}"
+                  f" DEACCESSIONED: elaborata come le altre (trattamento da decidere).")
 
     if not versions:
         print(f"  [INFO] Nessuna versione pubblica trovata.")
