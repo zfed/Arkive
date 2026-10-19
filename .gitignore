@@ -57,3 +57,5 @@ tools/dataverse-archivematica/fullDatasetList*.json
 tools/dataverse-archivematica/*report*.json
 # Liste fornite dai colleghi di Dataverse in formato URL (input, non versionate)
 tools/dataverse-archivematica/listaDataset*.txt
+# Documentazione operativa interna (non pubblicare: repo pubblico)
+documentazione/
