@@ -150,8 +150,13 @@ PAUSE_BETWEEN_DOIS = 2    # secondi di cortesia tra DOI diversi
 # API key Dataverse — lasciare "" per usare --apikey o la variabile d'ambiente
 API_KEY = ""
 
-# Verifica certificato SSL (False per certificati self-signed)
-SSL_VERIFY = True
+# Verifica del certificato SSL di dataverse.unimi.it.
+# Variabile DISTINTA da SSL_VERIFY: quest'ultima nel .env condiviso vale
+# "false" per i certificati self-signed di Archivematica e, se letta qui,
+# disattivava anche la verifica verso Dataverse, che ha un certificato valido.
+# Questo script parla solo con Dataverse: SSL_VERIFY viene ignorata.
+DATAVERSE_SSL_VERIFY: bool = os.environ.get(
+    "DATAVERSE_SSL_VERIFY", "true").lower() not in ("false", "0", "no")
 
 # Esportazione DCAT-AP e Schema.org (sovrascrivibile con EXPORT_DCAT=true nel .env)
 EXPORT_DCAT: bool = os.environ.get("EXPORT_DCAT", "false").lower() in ("true", "1", "yes")
@@ -1113,8 +1118,9 @@ def main():
     )
     parser.add_argument(
         "--no-verify-ssl", action="store_true",
-        help="Disabilita la verifica SSL (utile con certificati self-signed). "
-             "Equivalente a SSL_VERIFY=false nel .env"
+        help="Disabilita la verifica SSL verso Dataverse. "
+             "Equivalente a DATAVERSE_SSL_VERIFY=false nel .env "
+             "(SSL_VERIFY, riservata ad Archivematica, qui non ha effetto)"
     )
     parser.add_argument(
         "--dcat", action="store_true",
@@ -1128,10 +1134,13 @@ def main():
     global _active_api_key, _ssl_verify, EXPORT_DCAT
     _active_api_key = resolve_api_key(args.apikey)
 
-    env_ssl = os.environ.get("SSL_VERIFY", "true").lower()
-    if args.no_verify_ssl or env_ssl in ("false", "0", "no"):
-        _ssl_verify = False
-        print("[AVVISO] Verifica certificato SSL disabilitata.")
+    _ssl_verify = DATAVERSE_SSL_VERIFY and not args.no_verify_ssl
+    if not _ssl_verify:
+        print("[AVVISO] Verifica certificato SSL verso Dataverse disabilitata.")
+    if os.environ.get("SSL_VERIFY", "").lower() in ("false", "0", "no") and _ssl_verify:
+        print("[INFO] SSL_VERIFY=false ignorata (vale per Archivematica): "
+              "verso Dataverse la verifica resta attiva. "
+              "Per disattivarla: DATAVERSE_SSL_VERIFY=false.")
 
     if args.dcat:
         EXPORT_DCAT = True
@@ -1149,7 +1158,7 @@ def main():
     print(f"  Sorgente DOI : {args.dois} ({len(dois)} DOI)")
     print(f"  Destinazione : {output_root.resolve()}")
     print(f"  API key      : {key_display}")
-    print(f"  SSL verify   : {_ssl_verify}")
+    print(f"  SSL Dataverse: {_ssl_verify}")
     print(f"  Export DCAT  : {EXPORT_DCAT}")
     print(f"{'='*62}\n")
 
