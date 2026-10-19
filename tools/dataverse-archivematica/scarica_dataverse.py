@@ -2,33 +2,48 @@
 """
 scarica_dataverse.py
 --------------------
-Scarica TUTTE LE VERSIONI di ogni dataset (+ metadati JSON) da dataverse.unimi.it
-sulla base dei DOI contenuti in dois.txt.
+Scarica tutte le versioni PUBBLICATE di ogni dataset (+ metadati JSON) da
+dataverse.unimi.it sulla base dei DOI contenuti in dois.txt.
+
+I file vengono scaricati UNA volta per major release: solo la prima versione
+pubblicata di ogni major (di norma x.0). Nelle minor release di Dataverse
+cambiano solo i metadati (verificato con analizza_versioni.py sui 717 DOI
+della lista del 30/09/2026: 0 file aggiunti, rimossi o cambiati in 523
+passaggi minor), quindi per le minor si conservano solo i metadati e un
+manifest files.json che rimanda ai contenuti gia' presenti nel pacchetto.
+Salvaguardia: un file di una minor assente dalla versione di riferimento
+(id nuovo o checksum diverso) viene comunque scaricato e segnalato a log come
+[ANOMALIA]. Le bozze (DRAFT) non vengono scaricate.
 
 Struttura output (compatibile con Archivematica):
 
   DATASET_TRASFERITI/
     <doi_sanitizzato>/
       objects/
-        v1.0/
+        v1.0/                <- prima versione della major 1: modalita' download
           objects/           <- file del dataset
             file1.csv
           metadata/          <- metadati Dataverse della versione
             dataverse.json
             metadata.csv     <- DC per questa versione (preservation)
+            files.json       <- manifest dei file della versione
             dcat.json        <- DCAT-AP JSON-LD (solo se EXPORT_DCAT=true)
             schema.json      <- Schema.org JSON-LD (solo se EXPORT_DCAT=true)
-        v2.0/
-          objects/
-            file2.csv
+        v1.1/                <- minor: modalita' solo_metadati (niente objects/)
           metadata/
             dataverse.json
             metadata.csv
+            files.json       <- id, label corrente, checksum e percorso del
+                                contenuto (es. objects/v1.0/objects/file1.csv)
             dcat.json        <- (solo se EXPORT_DCAT=true)
             schema.json      <- (solo se EXPORT_DCAT=true)
+        v2.0/                <- nuova major: modalita' download
+          objects/
+          metadata/
       metadata/
-        metadata.csv         <- DC per TUTTE le versioni (letto da Archivematica)
-  riepilogo_download.json
+        metadata.csv         <- DC per i file presenti nel pacchetto (letto da
+                                Archivematica)
+  riepilogo_download.json    <- per versione: modalita, file, anomalie
   doi_vuoti.json             <- DOI senza file (non viene creata la directory)
 
 Nota DCAT: il file dcat.json viene generato localmente a partire dai metadati
@@ -553,15 +568,24 @@ def _dest_relativa(file_info: dict, nome: str) -> Path:
 
 
 def download_file(file_info: dict, data_dir: Path,
-                  percorsi_usati: set = None) -> bool:
-    """Scarica un singolo file del dataset. Restituisce True se riuscito."""
+                  percorsi_usati: set = None) -> tuple[Path | None, str]:
+    """
+    Scarica un singolo file del dataset.
+
+    Restituisce (percorso_su_disco, rappresentazione) se il file e' presente
+    a fine chiamata (scaricato o gia' presente e integro), (None, "") se no.
+    rappresentazione: "nativo", "originale" (ingerito, format=original) o
+    "derivata_tab" (fallback). Il percorso serve al manifest files.json delle
+    minor release, che punta al contenuto conservato nella prima versione
+    della major.
+    """
     df      = file_info.get("dataFile", {})
     file_id = df.get("id")
     label   = file_info.get("label") or df.get("filename") or f"file_{file_id}"
 
     if file_id is None:
         print(f"  [ATTENZIONE] ID file mancante, salto: {label}")
-        return False
+        return None, ""
 
     # ── Scelta della rappresentazione da conservare ─────────────────────────
     # Per i file ingeriti come tabellari si conserva l'ORIGINALE depositato
@@ -574,6 +598,7 @@ def download_file(file_info: dict, data_dir: Path,
         expected_size = df.get("originalFileSize")
         params        = {"format": "original"}
         etichetta     = f"{orig_name} (originale di {label})"
+        rappr         = "originale"
     else:
         dest          = data_dir / _dest_relativa(file_info, label)
         # NB: la dimensione compare come "fileSize" o "filesize" a seconda della
@@ -581,6 +606,7 @@ def download_file(file_info: dict, data_dir: Path,
         expected_size = df.get("fileSize") or df.get("filesize")
         params        = None
         etichetta     = label
+        rappr         = "nativo"
 
     # Per gli ingeriti il checksum del manifest si riferisce all'originale
     # (verificato empiricamente): e' quindi autoritativo su entrambi i rami.
@@ -619,19 +645,19 @@ def download_file(file_info: dict, data_dir: Path,
         if expected_size is not None:
             if actual_size == expected_size:
                 print(f"      [SKIP] Gia' presente (dimensione ok): {etichetta}")
-                return True
+                return dest, rappr
             print(f"      [RISCARICO] Dimensione non combacia "
                   f"(attesi {expected_size} B, trovati {actual_size} B): {etichetta}")
         elif expected_hash is not None:
             local_hash = _hash_file(dest, algo)
             if local_hash.lower() == expected_hash.lower():
                 print(f"      [SKIP] Gia' presente ({algo.upper()} ok): {etichetta}")
-                return True
+                return dest, rappr
             print(f"      [RISCARICO] {algo.upper()} non combacia "
                   f"(atteso {expected_hash[:8]}..., trovato {local_hash[:8]}...): {etichetta}")
         else:
             print(f"      [SKIP] Gia' presente (nessuna verifica disponibile): {etichetta}")
-            return True
+            return dest, rappr
 
     url = f"{BASE_URL}/api/access/datafile/{file_id}"
     print(f"      Scarico: {etichetta} ...", end=" ", flush=True)
@@ -651,7 +677,7 @@ def download_file(file_info: dict, data_dir: Path,
             print(f"ATTENZIONE (originale non disponibile: {e}) -> fallback .tab")
             return _download_tab_fallback(file_info, file_id, label, data_dir)
         print(f"ERRORE ({e})")
-        return False
+        return None, ""
 
     # ── Verifica di integrita' del file appena scaricato ────────────────────
     # Intercetta i troncamenti nel momento in cui avvengono: senza questo, un
@@ -667,7 +693,7 @@ def download_file(file_info: dict, data_dir: Path,
                 dest.unlink()
             except OSError:
                 pass
-            return False
+            return None, ""
     elif expected_size is not None and dest.stat().st_size != expected_size:
         print(f"ERRORE (dimensione post-download errata: "
               f"attesi {expected_size} B, ottenuti {dest.stat().st_size} B)")
@@ -675,14 +701,14 @@ def download_file(file_info: dict, data_dir: Path,
             dest.unlink()
         except OSError:
             pass
-        return False
+        return None, ""
 
     print(f"OK ({size_kb} KB)")
-    return True
+    return dest, rappr
 
 
 def _download_tab_fallback(file_info: dict, file_id: int, label: str,
-                           data_dir: Path) -> bool:
+                           data_dir: Path) -> tuple[Path | None, str]:
     """
     Fallback per i file ingeriti quando format=original non e' disponibile:
     scarica la derivata .tab. La verifica checksum NON e' applicabile (il
@@ -701,16 +727,16 @@ def _download_tab_fallback(file_info: dict, file_id: int, label: str,
         size_kb = dest.stat().st_size // 1024
     except Exception as e:
         print(f"      ERRORE anche sul fallback .tab ({e})")
-        return False
+        return None, ""
     if dest.stat().st_size == 0:
         print("      ERRORE (fallback .tab vuoto)")
         try:
             dest.unlink()
         except OSError:
             pass
-        return False
+        return None, ""
     print(f"      [FALLBACK] salvata derivata .tab ({size_kb} KB, verifica checksum non applicabile): {label}")
-    return True
+    return dest, "derivata_tab"
 
 
 # ── Generazione metadata.csv per Archivematica ───────────────────────────────
@@ -812,8 +838,10 @@ def write_archivematica_metadata(versions: list[dict], doi_dir: Path,
              for f in objects_dir.rglob("*") if f.is_file()]
         ) if objects_dir.exists() else []
 
-        targets = ([f"objects/{vtag}/objects/{fname}" for fname in files_in_objects]
-                   if files_in_objects else [f"objects/{vtag}/objects/"])
+        # Solo file fisicamente presenti nel pacchetto: le minor in modalita'
+        # solo_metadati non hanno objects/<vtag>/objects/ e non producono
+        # righe (i loro metadati restano in objects/<vtag>/metadata/).
+        targets = [f"objects/{vtag}/objects/{fname}" for fname in files_in_objects]
 
         for filepath in targets:
             rows.append({
@@ -922,31 +950,113 @@ def _dataset_has_files(versions: list[dict]) -> tuple[bool, str]:
 
 # ── Elaborazione per versione ─────────────────────────────────────────────────
 
+def _nuovo_registro_major(vtag: str) -> dict:
+    """
+    Registro dei contenuti conservati per una major release.
+
+      versione_riferimento : prima versione della major (quella scaricata)
+      per_id               : dataFile.id -> voce (vedi _registra_contenuto)
+      ids_precedenti       : id dei file della versione elaborata per ultima,
+                             per segnalare i file rimossi in una minor
+    """
+    return {"versione_riferimento": vtag, "per_id": {}, "ids_precedenti": set()}
+
+
+def _registra_contenuto(registro: dict, file_info: dict, dest: Path | None,
+                        rappr: str, vtag: str, doi_dir: Path) -> dict:
+    """
+    Registra dove e' conservato il contenuto di un file (dest=None se il
+    download non e' riuscito) e restituisce la voce registrata.
+    """
+    df = file_info.get("dataFile", {})
+    chk_val, chk_algo = _expected_checksum(df)
+    voce = {
+        "percorso":         dest.relative_to(doi_dir).as_posix() if dest else None,
+        "nome_su_disco":    dest.name if dest else None,
+        "checksum":         chk_val,
+        "algoritmo":        chk_algo,
+        "label":            file_info.get("label") or df.get("filename"),
+        "directoryLabel":   file_info.get("directoryLabel") or None,
+        "versione":         vtag,
+        "rappresentazione": rappr or None,
+    }
+    if df.get("id") is not None:
+        registro["per_id"][df["id"]] = voce
+    return voce
+
+
+def _voce_manifest(file_info: dict, voce: dict) -> dict:
+    """
+    Riga di files.json: identita' e nome CORRENTI del file nella versione,
+    piu' il punto del pacchetto in cui il suo contenuto e' conservato.
+    "rinominato" confronta label/directoryLabel correnti con quelli che il
+    file aveva nella versione in cui e' stato scaricato.
+    """
+    df = file_info.get("dataFile", {})
+    chk_val, chk_algo = _expected_checksum(df)
+    label    = file_info.get("label") or df.get("filename")
+    dirlabel = file_info.get("directoryLabel") or None
+    return {
+        "id":                 df.get("id"),
+        "label":              label,
+        "directoryLabel":     dirlabel,
+        "checksum":           ({"tipo": chk_algo, "valore": chk_val}
+                               if chk_val else None),
+        "nome_su_disco":      voce.get("nome_su_disco"),
+        "percorso_contenuto": voce.get("percorso"),
+        "versione_contenuto": voce.get("versione"),
+        "rappresentazione":   voce.get("rappresentazione"),
+        "rinominato":         (label, dirlabel) != (voce.get("label"),
+                                                    voce.get("directoryLabel")),
+    }
+
+
 def process_version(doi: str, version: dict, doi_dir: Path,
-                    meta_dir: Path) -> dict:
+                    meta_dir: Path, registro: dict, modalita: str) -> dict:
     """
     Elabora una singola versione di un dataset.
+
+    modalita:
+      "download"      prima versione pubblicata della major: i file vengono
+                      scaricati in objects/<vtag>/objects/ come in passato;
+      "solo_metadati" minor successive della stessa major: nessun download,
+                      solo metadati e manifest files.json che rimanda ai
+                      contenuti gia' conservati (registro della major).
+
+    Salvaguardia: in "solo_metadati" un file con dataFile.id assente dal
+    registro, o con checksum diverso da quello registrato, viene comunque
+    scaricato in objects/<vtag>/objects/ e segnalato come [ANOMALIA]. La
+    regola "nelle minor cambiano solo i metadati" e' verificata
+    empiricamente (analizza_versioni.py), non garantita da Dataverse.
     """
     major     = version.get("versionNumber", 0)
     minor     = version.get("versionMinorNumber", 0)
     vtag      = version_tag(major, minor)
     ver_str   = f"{major}.{minor}"
     ver_state = version.get("versionState", "")
+    rif       = registro["versione_riferimento"]
 
     result = {
-        "version":   vtag,
-        "state":     ver_state,
-        "status":    "ok",
-        "files_ok":  0,
-        "files_err": 0,
-        "error":     None,
+        "version":              vtag,
+        "state":                ver_state,
+        "modalita":             modalita,
+        "versione_riferimento": rif,
+        "status":               "ok",
+        "files_ok":             0,
+        "files_riferiti":       0,
+        "files_err":            0,
+        "anomalie":             [],
+        "error":                None,
     }
 
-    print(f"  ── Versione {vtag} [{ver_state}]")
+    print(f"  ── Versione {vtag} [{ver_state}] — "
+          + ("download" if modalita == "download"
+             else f"solo metadati (contenuti in {rif})"))
 
+    # objects/<vtag>/objects/ viene creata da download_file solo se serve:
+    # una minor senza anomalie non ha cartella dati.
     data_dir     = doi_dir / "objects" / vtag / "objects"
     ver_meta_dir = doi_dir / "objects" / vtag / "metadata"
-    data_dir.mkdir(parents=True, exist_ok=True)
     ver_meta_dir.mkdir(parents=True, exist_ok=True)
 
     # ── dataverse.json ────────────────────────────────────────────────────────
@@ -991,18 +1101,108 @@ def process_version(doi: str, version: dict, doi_dir: Path,
     files = version.get("files", [])
     if not files:
         print(f"    [data] Nessun file in questa versione.")
-    else:
+    elif modalita == "download":
         print(f"    [data] {len(files)} file trovati, inizio download...")
-        percorsi_usati = set()   # percorsi gia' assegnati in questa versione
-        for file_info in files:
-            ok = download_file(file_info, data_dir, percorsi_usati)
-            if ok:
-                result["files_ok"] += 1
-            else:
-                result["files_err"] += 1
+    else:
+        print(f"    [data] {len(files)} file: nessun download previsto, "
+              f"verifica rispetto a {rif}...")
+
+    manifest       = []
+    percorsi_usati = set()   # percorsi gia' assegnati in questa versione
+    ids_correnti   = set()
+    for file_info in files:
+        df       = file_info.get("dataFile", {})
+        fid      = df.get("id")
+        chk_val, _ = _expected_checksum(df)
+        voce     = registro["per_id"].get(fid) if fid is not None else None
+        percorso = _dest_relativa(file_info, file_info.get("label")
+                                  or df.get("filename") or f"file_{fid}").as_posix()
+        if fid is not None:
+            ids_correnti.add(fid)
+
+        # Va scaricato? Sempre in modalita' download; in solo_metadati solo se
+        # il contenuto non e' gia' conservato (anomalia) o se il download nella
+        # versione di riferimento non era riuscito (recupero).
+        da_scaricare = modalita == "download"
+        if not da_scaricare:
+            anomalia = None
+            if voce is None:
+                anomalia = "file_assente_dal_riferimento"
+            elif (chk_val and voce["checksum"]
+                  and chk_val.lower() != voce["checksum"].lower()):
+                anomalia = "contenuto_cambiato"
+            if anomalia:
+                print(f"    [ANOMALIA] {doi} {vtag}: {anomalia} — id {fid}, "
+                      f"'{percorso}' — scarico comunque")
+                result["anomalie"].append({"tipo": anomalia, "id": fid,
+                                           "percorso": percorso})
+                da_scaricare = True
+            elif voce["percorso"] is None:
+                print(f"    [AVVISO] contenuto di id {fid} non ottenuto in "
+                      f"{voce['versione']}: tento il download in {vtag}")
+                da_scaricare = True
+
+        if not da_scaricare:
+            result["files_riferiti"] += 1
+            riga = _voce_manifest(file_info, voce)
+            if riga["rinominato"]:
+                vecchio = voce["label"]
+                if voce["directoryLabel"]:
+                    vecchio = f"{voce['directoryLabel']}/{vecchio}"
+                print(f"      [rinomina] id {fid}: '{vecchio}' -> '{percorso}' "
+                      f"(contenuto in {riga['percorso_contenuto']})")
+            manifest.append(riga)
+            continue
+
+        dest, rappr = download_file(file_info, data_dir, percorsi_usati)
+        if dest is not None:
+            result["files_ok"] += 1
+            voce = _registra_contenuto(registro, file_info, dest, rappr,
+                                       vtag, doi_dir)
+        else:
+            result["files_err"] += 1
+            nuova = _registra_contenuto({"per_id": {}}, file_info, None, "",
+                                        vtag, doi_dir)
+            # Si registra il fallimento solo se non c'e' gia' un contenuto
+            # valido: cosi' le minor successive ritentano il download.
+            if fid is not None and fid not in registro["per_id"]:
+                registro["per_id"][fid] = nuova
+            voce = nuova
+        manifest.append(_voce_manifest(file_info, voce))
+
+    # File presenti nella versione precedente della stessa major e assenti
+    # da questa: nessun rischio di perdita (il contenuto resta conservato),
+    # ma e' comunque una violazione della regola e va tracciata.
+    if modalita == "solo_metadati":
+        for fid in sorted(registro["ids_precedenti"] - ids_correnti):
+            print(f"    [ANOMALIA] {doi} {vtag}: file_rimosso — id {fid} "
+                  f"(nessun download necessario)")
+            result["anomalie"].append({"tipo": "file_rimosso", "id": fid,
+                                       "percorso": registro["per_id"]
+                                       .get(fid, {}).get("percorso")})
+    registro["ids_precedenti"] = ids_correnti
 
     if result["files_err"] > 0:
         result["status"] = "partial"
+
+    # ── files.json: manifest dei file della versione ─────────────────────────
+    # Sempre rigenerato: dipende dai percorsi effettivi nel pacchetto, che
+    # possono cambiare fra un run e l'altro (es. download recuperati).
+    files_json = {
+        "doi":                  doi,
+        "versione":             vtag,
+        "modalita":             modalita,
+        "versione_riferimento": rif,
+        "nota": ("percorso_contenuto e' relativo alla radice del pacchetto; "
+                 "label e directoryLabel sono quelli correnti in questa "
+                 "versione, nome_su_disco quello con cui il contenuto e' "
+                 "salvato in versione_contenuto"),
+        "file":                 manifest,
+    }
+    with open(ver_meta_dir / "files.json", "w", encoding="utf-8") as f:
+        json.dump(files_json, f, ensure_ascii=False, indent=2)
+    print(f"    [metadata] files.json generato ({len(manifest)} file, "
+          f"{result['files_riferiti']} rimandati a versioni precedenti)")
 
     # ── metadata.csv per questa versione ─────────────────────────────────────
     ver_csv_path = ver_meta_dir / "metadata.csv"
@@ -1025,6 +1225,7 @@ def process_doi(doi: str, output_root: Path) -> dict:
         "error":        None,
         "empty_reason": None,
         "bozze_escluse": 0,
+        "anomalie":     0,
     }
 
     doi_dir = output_root / sanitize(doi)
@@ -1094,9 +1295,20 @@ def process_doi(doi: str, output_root: Path) -> dict:
     meta_dir = doi_dir / "metadata"
     meta_dir.mkdir(parents=True, exist_ok=True)
 
+    # Una sola copia dei file per major: la prima versione pubblicata della
+    # major (di norma x.0) scarica, le minor successive rimandano ad essa.
+    registri: dict[int, dict] = {}
     any_error = False
     for ver in versions:
-        vres = process_version(doi, ver, doi_dir, meta_dir)
+        major = ver.get("versionNumber", 0)
+        if major not in registri:
+            registri[major] = _nuovo_registro_major(
+                version_tag(major, ver.get("versionMinorNumber", 0)))
+            modalita = "download"
+        else:
+            modalita = "solo_metadati"
+        vres = process_version(doi, ver, doi_dir, meta_dir,
+                               registri[major], modalita)
         result["versions"].append(vres)
         if vres["status"] == "error":
             any_error = True
@@ -1105,6 +1317,12 @@ def process_doi(doi: str, output_root: Path) -> dict:
 
     if any_error and result["status"] == "ok":
         result["status"] = "partial"
+
+    n_anomalie = sum(len(v["anomalie"]) for v in result["versions"])
+    result["anomalie"] = n_anomalie
+    if n_anomalie:
+        print(f"  [ANOMALIA] {doi}: {n_anomalie} anomalia/e nelle minor release "
+              f"(dettaglio in riepilogo_download.json)")
 
     # Genera metadata.csv unico per tutte le versioni (sempre rigenerato)
     write_archivematica_metadata(versions, doi_dir, meta_dir)
@@ -1120,7 +1338,8 @@ def process_doi(doi: str, output_root: Path) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Scarica TUTTE LE VERSIONI di dataset e metadati da dataverse.unimi.it"
+        description="Scarica le versioni pubblicate di dataset e metadati da "
+                    "dataverse.unimi.it (file solo alla prima versione di ogni major)"
     )
     parser.add_argument(
         "--dois", default=DOIS_FILE,
@@ -1173,7 +1392,7 @@ def main():
                   ("(non impostata)" if not _active_api_key else "****")
 
     print(f"{'='*62}")
-    print(f"  Dataverse UNIMI — Download automatico (tutte le versioni)")
+    print(f"  Dataverse UNIMI — Download automatico (file alle major release)")
     print(f"  Sorgente DOI : {args.dois} ({len(dois)} DOI)")
     print(f"  Destinazione : {output_root.resolve()}")
     print(f"  API key      : {key_display}")
@@ -1190,11 +1409,15 @@ def main():
 
         icon    = {"ok": "✓", "partial": "⚠", "empty": "○"}.get(result["status"], "✗")
         tot_ok  = sum(v["files_ok"]  for v in result["versions"])
+        tot_rif = sum(v["files_riferiti"] for v in result["versions"])
         tot_err = sum(v["files_err"] for v in result["versions"])
         print(
             f"  {icon} Stato: {result['status']} | "
             f"Versioni: {len(result['versions'])} | "
-            f"File OK: {tot_ok} | Errori file: {tot_err}"
+            f"File scaricati/presenti: {tot_ok} | Rimandati: {tot_rif} | "
+            f"Errori file: {tot_err}"
+            + (f" | Anomalie: {result['anomalie']}" if result.get("anomalie") else "")
+            + (f" | Bozza esclusa" if result.get("bozze_escluse") else "")
         )
         if result.get("empty_reason"):
             print(f"  Motivo: {result['empty_reason']}")
@@ -1240,6 +1463,7 @@ def main():
     partial = sum(1 for r in summary if r["status"] == "partial")
     errors  = sum(1 for r in summary if r["status"] == "error")
     empty   = sum(1 for r in summary if r["status"] == "empty")
+    con_anomalie = sum(1 for r in summary if r.get("anomalie"))
 
     print(f"{'='*62}")
     print(f"  RIEPILOGO FINALE")
@@ -1247,6 +1471,8 @@ def main():
     print(f"  Parziali    : {partial}")
     print(f"  Errori      : {errors}")
     print(f"  Vuoti       : {empty}")
+    print(f"  Con anomalie: {con_anomalie}" + ("  <- verificare [ANOMALIA] nel log"
+                                             if con_anomalie else ""))
     print(f"  Riepilogo   : {summary_path}")
     if empty_records:
         print(f"  DOI vuoti   : {empty_path}")
