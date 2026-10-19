@@ -17,6 +17,7 @@ Arkive/
     │   ├── requirements.txt
     │   ├── .env.template
     │   ├── dois.txt.example
+    │   ├── estrai_dois.py
     │   ├── scarica_dataverse.py
     │   ├── archivematica_ingest.py
     │   ├── riconcilia_stato.py
@@ -40,7 +41,7 @@ Arkive/
 
 ## Tool disponibili
 
-- [`dataverse-archivematica`](tools/dataverse-archivematica/README.md): pipeline per il trasferimento di dataset da Dataverse UNIMI ad Archivematica per la conservazione a lungo termine, con riconciliazione dello stato.
+- [`dataverse-archivematica`](tools/dataverse-archivematica/README.md): pipeline per il trasferimento di dataset da Dataverse UNIMI ad Archivematica per la conservazione a lungo termine, con riconciliazione dello stato. Include `estrai_dois.py`, che converte l'elenco JSON dei dataset fornito dai colleghi di Dataverse nel file `dois.txt` letto dalla pipeline.
 - [`bulk_register_aips`](tools/bulk_register_aips/README.md): registrazione via API di AIP orfani (presenti su disco ma assenti dal database dello Storage Service).
 - [`delete_AIPs`](tools/delete_AIPs/README.md): elenco e richiesta di cancellazione di AIP nello Storage Service di Archivematica.
 

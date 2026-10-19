@@ -49,3 +49,6 @@ tools/dataverse-archivematica/*.bak_*
 tools/dataverse-archivematica/*.pre-wipe
 # Liste dei lotti generate (se non si vogliono versionare)
 tools/dataverse-archivematica/lotti/
+
+# Elenchi JSON dei dataset forniti dai colleghi di Dataverse (input di estrai_dois.py)
+tools/dataverse-archivematica/fullDatasetList*.json

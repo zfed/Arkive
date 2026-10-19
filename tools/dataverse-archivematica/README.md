@@ -15,6 +15,7 @@ Pipeline automatizzata per trasferire dataset da **Dataverse UNIMI**
 | `censisci_archivi.py` | *Migrazione (sola lettura).* Individua i dataset che contengono archivi compressi (zip, 7z, tar, gzip, rar). Con l'estrazione attiva un dataset dichiarato come "1 file" puo' produrre migliaia di oggetti nell'AIP: senza questo censimento il piano dei lotti sottostima i dataset piu' pesanti. Resumibile |
 | `prepara_lotti.py` | *Migrazione (sola lettura).* Suddivide lo scope in lotti bilanciati su **numero di file e volume**, non sul conteggio dei DOI (il corpus va da 1 file a quasi 15.000 per dataset). I dataset che eccedono da soli le soglie diventano lotti dedicati |
 | `trova_da_riscaricare.py` | *Migrazione (sola lettura salvo `--elimina`).* Confronta i file presenti su disco con quelli attesi dal report e individua i pacchetti scaricati in modo incompleto (tipicamente per file omonimi in sottocartelle `directoryLabel` sovrascritti prima della relativa correzione). Con `--elimina` rimuove le cartelle dei pacchetti incompleti perche' vengano ri-scaricati da zero |
+| `estrai_dois.py` | *Preparazione (sola lettura).* Converte il JSON dei dataset fornito dai colleghi di Dataverse (campo `dsUrl`) nel formato di `dois.txt`: normalizza in `doi:…`, elimina i duplicati, segnala i record non validi e con `--escludi` toglie i DOI di altre liste (es. `doi_non_raggiungibili.txt`). Non sovrascrive l'output senza `--force` |
 
 ## Installazione
 
