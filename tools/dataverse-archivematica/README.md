@@ -16,6 +16,7 @@ Pipeline automatizzata per trasferire dataset da **Dataverse UNIMI**
 | `prepara_lotti.py` | *Migrazione (sola lettura).* Suddivide lo scope in lotti bilanciati su **numero di file e volume**, non sul conteggio dei DOI (il corpus va da 1 file a quasi 15.000 per dataset). I dataset che eccedono da soli le soglie diventano lotti dedicati |
 | `trova_da_riscaricare.py` | *Migrazione (sola lettura salvo `--elimina`).* Confronta i file presenti su disco con quelli attesi dal report e individua i pacchetti scaricati in modo incompleto (tipicamente per file omonimi in sottocartelle `directoryLabel` sovrascritti prima della relativa correzione). Con `--elimina` rimuove le cartelle dei pacchetti incompleti perche' vengano ri-scaricati da zero |
 | `estrai_dois.py` | *Preparazione (sola lettura).* Converte il JSON dei dataset fornito dai colleghi di Dataverse (campo `dsUrl`) nel formato di `dois.txt`: normalizza in `doi:…`, elimina i duplicati, segnala i record non validi e con `--escludi` toglie i DOI di altre liste (es. `doi_non_raggiungibili.txt`). Non sovrascrive l'output senza `--force` |
+| `analizza_versioni.py` | *Analisi (sola lettura).* Confronta, versione dopo versione, i file di ogni dataset (per `dataFile.id` e checksum) e verifica la regola indicata dai colleghi Dataverse: nelle minor release cambiano solo i metadati, i file solo nelle major. Segnala le violazioni e stima file e volume nei diversi scenari di download (tutte le versioni / solo major release), prima di modificare la pipeline |
 
 ## Installazione
 
@@ -185,7 +186,7 @@ Vedi `manuale_dataverse_archivematica.pdf` per il manuale completo.
 
 ## Autori
 
-Fede (zfed) — Universita' degli Studi di Milano, Direzione ICT (2026)
+Federica Zanardini (zfed) — Universita' degli Studi di Milano, Direzione ICT (2026)
 Sviluppato con il supporto di Claude AI (Anthropic).
 
 ## Licenza
