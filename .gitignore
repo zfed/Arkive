@@ -59,3 +59,5 @@ tools/dataverse-archivematica/*report*.json
 tools/dataverse-archivematica/listaDataset*.txt
 # Documentazione operativa interna (non pubblicare: repo pubblico)
 documentazione/
+# Liste di lavoro temporanee (es. nuovi DOI ricevuti in corso d'opera)
+tools/dataverse-archivematica/lista_*.txt
