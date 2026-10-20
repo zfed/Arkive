@@ -24,7 +24,7 @@
 # USO
 #   cd tools/dataverse-archivematica
 #   # i parametri vengono letti dal .env (DATAVERSE_URL, DATAVERSE_API_KEY,
-#   # SSL_VERIFY); le variabili di shell hanno la precedenza
+#   # DATAVERSE_SSL_VERIFY); le variabili di shell hanno la precedenza
 #   python3 censisci_archivi.py [lista_doi.txt] [--sleep 0.3]
 #                               [--piano lotti]
 #
@@ -66,7 +66,9 @@ _load_dotenv()
 
 BASE_URL   = os.environ.get("DATAVERSE_URL", "https://dataverse.unimi.it").rstrip("/")
 API_KEY    = os.environ.get("DATAVERSE_API_KEY", "")
-SSL_VERIFY = os.environ.get("SSL_VERIFY", "true").lower() not in ("false", "0", "no")
+# Verifica SSL verso Dataverse: DATAVERSE_SSL_VERIFY, non SSL_VERIFY (che nel
+# .env condiviso vale false per i certificati self-signed di Archivematica).
+SSL_VERIFY = os.environ.get("DATAVERSE_SSL_VERIFY", "true").lower() not in ("false", "0", "no")
 
 REPORT_PATH = "archivi_report.json"
 RETRIES      = 4

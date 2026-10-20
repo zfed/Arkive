@@ -23,7 +23,7 @@
 # USO
 #   cd tools/dataverse-archivematica          # per leggere le stesse convenzioni
 #   # I parametri vengono letti dal file .env della cartella corrente (stesso
-#   # .env della pipeline: DATAVERSE_URL, DATAVERSE_API_KEY, SSL_VERIFY). Le
+#   # .env della pipeline: DATAVERSE_URL, DATAVERSE_API_KEY, DATAVERSE_SSL_VERIFY). Le
 #   # variabili esportate nella shell hanno comunque la precedenza sul .env.
 #   python3 diagnostica_checksum.py [doi] [--max N]
 #
@@ -68,7 +68,9 @@ _load_dotenv()
 
 BASE_URL = os.environ.get("DATAVERSE_URL", "https://dataverse.unimi.it").rstrip("/")
 API_KEY  = os.environ.get("DATAVERSE_API_KEY", "")
-SSL_VERIFY = os.environ.get("SSL_VERIFY", "true").lower() not in ("false", "0", "no")
+# Verifica SSL verso Dataverse: DATAVERSE_SSL_VERIFY, non SSL_VERIFY (che nel
+# .env condiviso vale false per i certificati self-signed di Archivematica).
+SSL_VERIFY = os.environ.get("DATAVERSE_SSL_VERIFY", "true").lower() not in ("false", "0", "no")
 
 
 def _headers() -> dict:

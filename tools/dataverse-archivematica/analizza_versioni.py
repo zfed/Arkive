@@ -35,7 +35,7 @@
 #
 # USO
 #   cd tools/dataverse-archivematica
-#   # stesso .env della pipeline: DATAVERSE_URL, DATAVERSE_API_KEY, SSL_VERIFY
+#   # stesso .env della pipeline: DATAVERSE_URL, DATAVERSE_API_KEY, DATAVERSE_SSL_VERIFY
 #   python3 analizza_versioni.py lista_doi.txt [--sleep 0.3] [--force]
 #
 #   La lista accetta righe "doi:10.13130/...", "10.13130/..." oppure
@@ -83,7 +83,9 @@ _load_dotenv()
 
 BASE_URL   = os.environ.get("DATAVERSE_URL", "https://dataverse.unimi.it").rstrip("/")
 API_KEY    = os.environ.get("DATAVERSE_API_KEY", "")
-SSL_VERIFY = os.environ.get("SSL_VERIFY", "true").lower() not in ("false", "0", "no")
+# Verifica SSL verso Dataverse: DATAVERSE_SSL_VERIFY, non SSL_VERIFY (che nel
+# .env condiviso vale false per i certificati self-signed di Archivematica).
+SSL_VERIFY = os.environ.get("DATAVERSE_SSL_VERIFY", "true").lower() not in ("false", "0", "no")
 
 REPORT_PATH  = "analisi_versioni_report.json"
 CSV_PATH     = "analisi_versioni.csv"
