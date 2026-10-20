@@ -90,14 +90,22 @@ df -h /mnt/e /var/archivematica 2>/dev/null | sed 's/^/    /'
 
 echo; echo "===== 7. FPR — PROMEMORIA (riapplicare a mano dopo il wipe) ====="
 cat << 'FPR'
+  Decisione valida: Fase 2 (runbook_fase2_cronaca, sez. 17) — conservazione
+  AS-IS dei formati contenitore. Sostituisce quella di Fase 1 (sez. 10.4).
+
   Format version GZip (x-fmt/266, UUID 3a19a758-481f-4fdc-9bb4-4052eb150d62)
       -> Enabled = YES   (conserva il PUID su .rds/.fastq.gz)
-  Regola ESTRAZIONE GZip (fprule extract, x-fmt/266)
-      -> Enabled = NO    (niente unpacking dei gzip a file singolo)
-  Regole estrazione ZIP / 7z / TAR / RAR
-      -> Enabled = YES   (invariate)
-  Verifica: test .rds (HADWPV) -> nessun unpacking, .rds = GZip x-fmt/266.
-  Lotto .tgz: riabilitare la SOLA regola estrazione GZip, poi ridisabilitarla.
+  Regole ESTRAZIONE dei formati contenitore (fprule purpose = extract):
+  GZip, ZIP, 7z, TAR, RAR, CAB, BZip
+      -> Enabled = NO    (archivi identificati ma conservati interi)
+  Regole estrazione delle immagini-disco (ISO, AFF, EO1...)
+      -> Enabled = YES   (invariate; assenti dal corpus)
+  Verifica: test .rds (HADWPV) -> nessun unpacking, .rds = GZip x-fmt/266;
+            un .zip resta intero nell'AIP, con PUID corretto.
+  Lotti con .tgz/.zip: NESSUN trattamento separato (la passata dedicata
+  GZip della Fase 1 non serve piu').
+  SQL di riapplicazione (prova in transazione, poi COMMIT): runbook Fase 2,
+  sez. 17.
 FPR
 
 echo; echo "===== 8. Processing configuration ====="
