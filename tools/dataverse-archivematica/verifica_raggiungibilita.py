@@ -11,9 +11,10 @@
 #     - sia pubblicato/accessibile (segnala bozze, accesso negato, file ristretti)
 #     - quanti file contiene e QUALE VOLUME avra' la ri-acquisizione con gli
 #       ORIGINALI (usa originalFileSize per gli ingeriti, fileSize altrimenti).
-#       Il conteggio copre TUTTE LE VERSIONI (endpoint /versions), perche' la
-#       pipeline scarica ogni versione in una cartella separata: il volume su
-#       disco e' la somma delle versioni, non quello dell'ultima.
+#       Il conteggio segue la regola di scarica_dataverse.py: i file vengono
+#       scaricati solo alla PRIMA VERSIONE PUBBLICATA DI OGNI MAJOR (le minor
+#       successive sono solo metadati) e le bozze (DRAFT) sono escluse. Per
+#       confronto il report riporta anche il totale su tutte le versioni.
 #
 #   Non cancella e non scrive nulla su Dataverse: esegue solo GET. L'unico file
 #   scritto in locale e' il report JSON (e i DOI non raggiungibili in un .txt).
@@ -75,6 +76,10 @@ API_KEY    = os.environ.get("DATAVERSE_API_KEY", "")
 SSL_VERIFY = os.environ.get("DATAVERSE_SSL_VERIFY", "true").lower() not in ("false", "0", "no")
 
 REPORT_PATH   = "reacquisizione_report.json"
+# Criterio con cui sono calcolati n_file e size_acquisizione. Lo legge
+# prepara_lotti.py per riconoscere i report prodotti col criterio precedente
+# (somma su tutte le versioni), che sovrastimano file e volume.
+CRITERIO_VOLUME = "prima_versione_di_ogni_major"
 UNREACH_PATH  = "doi_non_raggiungibili.txt"
 RETRIES       = 4
 BACKOFF_BASE  = 3      # secondi: attesa = BACKOFF_BASE * tentativo
@@ -198,18 +203,27 @@ def analizza(doi: str) -> dict:
     status, payload = _get_dataset(doi)
 
     if status == 200:
-        # L'endpoint /versions restituisce la LISTA di tutte le versioni.
-        # La pipeline scarica ogni versione in una cartella separata
-        # (objects/<versione>/objects/), quindi i file si ripetono a ogni
-        # versione: il volume su disco e' la SOMMA su tutte le versioni, non
-        # quello dell'ultima.
+        # L'endpoint /versions restituisce la LISTA di tutte le versioni
+        # (con la API key anche l'eventuale bozza). Stessa regola di
+        # scarica_dataverse.py: bozze escluse, file scaricati solo alla prima
+        # versione pubblicata di ogni major (objects/vX.Y/objects/); le minor
+        # successive hanno solo metadati. Il totale su tutte le versioni
+        # resta nel report (n_file_tutte_versioni, size_tutte_versioni) come
+        # confronto con il criterio precedente.
         versioni = payload.get("data", [])
         if not isinstance(versioni, list):
             versioni = []
+        bozze    = [v for v in versioni if v.get("versionState") == "DRAFT"]
+        numerate = sorted((v for v in versioni if v.get("versionState") != "DRAFT"),
+                          key=lambda v: (v.get("versionNumber") or 0,
+                                         v.get("versionMinorNumber") or 0))
+        prime_major = {}
+        for v in numerate:
+            prime_major.setdefault(v.get("versionNumber") or 0, v)
 
         n_file_tot = n_ing = n_restr = 0
         size_orig = size_tab = 0
-        for ver in versioni:
+        for ver in prime_major.values():
             for f in ver.get("files", []):
                 df = f.get("dataFile", {})
                 n_file_tot += 1
@@ -220,8 +234,12 @@ def analizza(doi: str) -> dict:
                 size_orig += _size_acquisizione(df)
                 size_tab  += _size_tab(df)
 
-        # Vuoto = nessun file in NESSUNA versione (stesso criterio di
-        # _dataset_has_files() in scarica_dataverse.py).
+        n_file_tutte = sum(len(v.get("files", [])) for v in numerate)
+        size_tutte   = sum(_size_acquisizione(f.get("dataFile", {}))
+                           for v in numerate for f in v.get("files", []))
+
+        # Vuoto = nessun file in nessuna versione pubblicata (stesso criterio
+        # di _dataset_has_files() in scarica_dataverse.py, bozze escluse).
         stato = "OK" if n_file_tot else "VUOTO"
 
         # Dati dell'ultima versione, utili come riferimento rapido.
@@ -231,11 +249,16 @@ def analizza(doi: str) -> dict:
         return {
             "doi": doi, "stato": stato,
             "versionState": ultima.get("versionState"),
-            "n_versioni": len(versioni),
+            "criterio_volume": CRITERIO_VOLUME,
+            "n_versioni": len(numerate),   # versioni pubblicate (bozze escluse)
+            "n_major": len(prime_major),   # versioni con download dei file
+            "n_bozze": len(bozze),
             "n_file_ultima": n_file_ult,
-            "n_file": n_file_tot,          # totale su tutte le versioni
+            "n_file": n_file_tot,          # file da scaricare (prime delle major)
             "n_ingeriti": n_ing, "n_ristretti": n_restr,
             "size_acquisizione": size_orig, "size_tab": size_tab,
+            "n_file_tutte_versioni": n_file_tutte,
+            "size_tutte_versioni":   size_tutte,
         }
 
     if status == 404:
@@ -289,8 +312,14 @@ def main() -> int:
         except Exception:
             risultati = {}
 
-    da_ritentare = sum(1 for r in risultati.values()
-                       if r.get("stato") not in STATI_DEFINITIVI)
+    def _concluso(r: dict) -> bool:
+        # OK/VUOTO calcolati col criterio precedente (senza criterio_volume)
+        # vanno ricalcolati: altrimenti il report mescolerebbe due criteri.
+        if r.get("stato") in ("OK", "VUOTO"):
+            return r.get("criterio_volume") == CRITERIO_VOLUME
+        return r.get("stato") in STATI_DEFINITIVI
+
+    da_ritentare = sum(1 for r in risultati.values() if not _concluso(r))
 
     print(f"Istanza    : {BASE_URL}")
     print(f"API key    : {'presente' if API_KEY else 'assente'}")
@@ -300,15 +329,17 @@ def main() -> int:
 
     for i, doi in enumerate(dois, 1):
         pregresso = risultati.get(doi)
-        if (pregresso and not args.force
-                and pregresso.get("stato") in STATI_DEFINITIVI):
+        if pregresso and not args.force and _concluso(pregresso):
             continue
         res = analizza(doi)
         risultati[doi] = res
         nota = res.get("stato")
         if res.get("stato") in ("OK", "VUOTO"):
             nota += (f"  ver={res.get('n_versioni', '?')}"
+                     f" major={res.get('n_major', '?')}"
                      f" file={res['n_file']} ingeriti={res['n_ingeriti']}")
+            if res.get("n_bozze"):
+                nota += " BOZZA"
             if res.get("n_ristretti"):
                 nota += f" RISTRETTI={res['n_ristretti']}"
             nota += f"  ~{_fmt_gb(res['size_acquisizione'])}"
@@ -357,10 +388,15 @@ def _riepilogo(risultati: dict) -> None:
     print(f"  ACCESSO NEGATO               : {negato}")
     print(f"  DA RIVERIFICARE (transitori) : {riverif}")
     print(f"  DOI con file RISTRETTI       : {ristretti}")
-    print(f"  Versioni totali da scaricare : {sum(r.get('n_versioni', 0) for r in vals)}")
-    print(f"  File totali da scaricare     : {sum(r.get('n_file', 0) for r in vals)}")
-    print(f"  Volume ri-acquisizione (orig): {_fmt_gb(tot_size)}  (tutte le versioni)")
-    print(f"  Volume equivalente in .tab   : {_fmt_gb(tot_tab)}  (tutte le versioni)")
+    tot_tutte = sum(r.get("size_tutte_versioni", 0) for r in vals)
+    print(f"  DOI con bozza (esclusa)      : {sum(1 for r in vals if r.get('n_bozze'))}")
+    print(f"  Versioni pubblicate          : {sum(r.get('n_versioni', 0) for r in vals)}")
+    print(f"    di cui con download (major): {sum(r.get('n_major', 0) for r in vals)}")
+    print(f"  File da scaricare            : {sum(r.get('n_file', 0) for r in vals)}"
+          f"  (tutte le versioni: {sum(r.get('n_file_tutte_versioni', 0) for r in vals)})")
+    print(f"  Volume ri-acquisizione (orig): {_fmt_gb(tot_size)}"
+          f"  (tutte le versioni: {_fmt_gb(tot_tutte)})")
+    print(f"  Volume equivalente in .tab   : {_fmt_gb(tot_tab)}")
 
     if riverif:
         print(f"\n  {riverif} DOI hanno dato esiti TRANSITORI (404 senza corpo")

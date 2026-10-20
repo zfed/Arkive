@@ -10,6 +10,13 @@
 # Il confronto e' fra il numero di file dichiarati dall'API (report di Fase 0)
 # e quelli effettivamente presenti su disco.
 #
+# Il report deve essere calcolato con lo stesso criterio della pipeline:
+# file solo alla prima versione pubblicata di ogni major (campo
+# "criterio_volume" di verifica_raggiungibilita.py). Con un report del
+# criterio precedente (somma su tutte le versioni) ogni pacchetto con minor
+# release risulterebbe falsamente incompleto: in quel caso --elimina e'
+# rifiutato.
+#
 # USO
 #   cd tools/dataverse-archivematica
 #   python3 trova_da_riscaricare.py [--ts <transfer_source>] [--elimina]
@@ -53,10 +60,22 @@ def main() -> int:
         print(f"ERRORE: report non trovato: {args.report}", file=sys.stderr)
         return 1
 
-    atteso = {}
+    atteso, criterio_vecchio = {}, 0
     for r in json.load(open(args.report, encoding="utf-8"))["dettaglio"]:
         if r.get("stato") == "OK":
             atteso[r["doi"].split("/")[-1]] = r.get("n_file", 0)
+            if r.get("criterio_volume") != "prima_versione_di_ogni_major":
+                criterio_vecchio += 1
+
+    if criterio_vecchio:
+        print(f"ATTENZIONE: {criterio_vecchio} DOI del report contano i file di "
+              f"TUTTE le versioni (criterio precedente): i pacchetti con minor\n"
+              f"  release risulterebbero falsamente incompleti. Rigenerare il "
+              f"report con verifica_raggiungibilita.py.", file=sys.stderr)
+        if args.elimina:
+            print("ERRORE: --elimina rifiutato con un report del criterio "
+                  "precedente.", file=sys.stderr)
+            return 1
 
     incompleti, ok, tot_mancanti = [], 0, 0
     for lotto in sorted(glob.glob(os.path.join(args.ts, "LOTTO_*"))):

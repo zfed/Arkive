@@ -14,9 +14,15 @@
 #   VOLUME, che sono i due fattori che determinano davvero i tempi di download
 #   e di ingest.
 #
+#   File e volume sono quelli calcolati da verifica_raggiungibilita.py con la
+#   regola di scarica_dataverse.py: download solo alla prima versione
+#   pubblicata di ogni major, bozze escluse. Un report prodotto col criterio
+#   precedente (somma su tutte le versioni, senza "criterio_volume") viene
+#   segnalato: sovrastima file e volume, va rigenerato.
+#
 #   Esclusi automaticamente:
 #     - i DOI non raggiungibili (404 reale) e ad accesso negato
-#     - i DOI vuoti (nessun file in nessuna versione)
+#     - i DOI vuoti (nessun file in nessuna versione pubblicata)
 #     - i DOI in stato DA_RIVERIFICARE (quadro non stabile: prima riverificarli)
 #
 #   Un dataset che da solo supera le soglie diventa un lotto a se' stante.
@@ -117,6 +123,15 @@ def main() -> int:
         return 1
 
     scope, esclusi = carica_scope(args.report)
+    vecchi = [r["doi"] for r in scope
+              if r.get("criterio_volume") != "prima_versione_di_ogni_major"]
+    if vecchi:
+        print(f"ATTENZIONE: {len(vecchi)} DOI del report hanno file e volume "
+              f"calcolati sommando TUTTE le versioni (criterio precedente):\n"
+              f"  i lotti risulterebbero sovradimensionati. Rigenerare il report:\n"
+              f"  python3 verifica_raggiungibilita.py <lista_doi.txt>\n"
+              f"  (i DOI col criterio precedente vengono ricalcolati in automatico)",
+              file=sys.stderr)
     if not scope:
         print("ERRORE: nessun DOI in stato OK nel report.", file=sys.stderr)
         return 1
