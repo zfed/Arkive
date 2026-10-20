@@ -11,6 +11,8 @@ __pycache__/
 # File di configurazione locale / segreti
 .env
 *.local
+# Certificati locali dello Storage Service (vedi tools/delete_AIPs/README.md)
+tools/delete_AIPs/certs/
 
 # Dati e output (adatta in base alle esigenze)
 data/
