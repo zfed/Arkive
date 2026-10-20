@@ -950,6 +950,19 @@ def _dataset_has_files(versions: list[dict]) -> tuple[bool, str]:
 
 # ── Elaborazione per versione ─────────────────────────────────────────────────
 
+_NOTA_EXPORT_NON_ULTIMA = (
+    "Export non richiesto: l'API /api/datasets/export di Dataverse restituisce "
+    "solo l'ultima versione pubblicata (:latest-published). I metadati di "
+    "questa versione sono in version_metadata.")
+
+
+def _ultima_pubblicata(versions: list[dict]) -> tuple[int, int] | None:
+    """(major, minor) dell'ultima versione RELEASED, None se non ce n'e'."""
+    rel = [(v.get("versionNumber", 0), v.get("versionMinorNumber", 0))
+           for v in versions if v.get("versionState") == "RELEASED"]
+    return max(rel) if rel else None
+
+
 def _nuovo_registro_major(vtag: str) -> dict:
     """
     Registro dei contenuti conservati per una major release.
@@ -1012,9 +1025,17 @@ def _voce_manifest(file_info: dict, voce: dict) -> dict:
 
 
 def process_version(doi: str, version: dict, doi_dir: Path,
-                    meta_dir: Path, registro: dict, modalita: str) -> dict:
+                    meta_dir: Path, registro: dict, modalita: str,
+                    ultima_pubblicata: bool = True) -> dict:
     """
     Elabora una singola versione di un dataset.
+
+    ultima_pubblicata: True solo per l'ultima versione RELEASED del dataset.
+    L'API di export (/api/datasets/export) restituisce solo quella: per le
+    precedenti Dataverse 6.10.1 risponde 400 "for published versions only the
+    latest (:latest-published) is supported". Per le altre versioni l'export
+    non viene richiesto: dataverse.json contiene comunque version_metadata
+    completo e schema.json non viene prodotto.
 
     modalita:
       "download"      prima versione pubblicata della major: i file vengono
@@ -1062,8 +1083,15 @@ def process_version(doi: str, version: dict, doi_dir: Path,
     # ── dataverse.json ────────────────────────────────────────────────────────
     dv_path = ver_meta_dir / "dataverse.json"
     if not dv_path.exists():
-        export   = get_version_export(doi, ver_str, exporter="dataverse_json")
-        combined = {"version_metadata": version, "dataverse_export": export}
+        if ultima_pubblicata:
+            export   = get_version_export(doi, ver_str, exporter="dataverse_json")
+            combined = {"version_metadata": version, "dataverse_export": export}
+        else:
+            combined = {
+                "version_metadata":      version,
+                "dataverse_export":      None,
+                "dataverse_export_nota": _NOTA_EXPORT_NON_ULTIMA,
+            }
         with open(dv_path, "w", encoding="utf-8") as f:
             json.dump(combined, f, ensure_ascii=False, indent=2)
         print(f"    [metadata] dataverse.json salvato")
@@ -1084,7 +1112,10 @@ def process_version(doi: str, version: dict, doi_dir: Path,
             print(f"    [metadata] dcat.json gia' presente, skip")
 
     # ── schema.json (Schema.org da API Dataverse) ─────────────────────────────
-    if EXPORT_DCAT:
+    if EXPORT_DCAT and not ultima_pubblicata:
+        print(f"    [INFO] schema.json non prodotto: l'export Schema.org di "
+              f"Dataverse e' disponibile solo per l'ultima versione pubblicata")
+    elif EXPORT_DCAT:
         schema_path = ver_meta_dir / "schema.json"
         if not schema_path.exists():
             schema_data = get_version_export(doi, ver_str, exporter="schema.org")
@@ -1298,6 +1329,7 @@ def process_doi(doi: str, output_root: Path) -> dict:
     # Una sola copia dei file per major: la prima versione pubblicata della
     # major (di norma x.0) scarica, le minor successive rimandano ad essa.
     registri: dict[int, dict] = {}
+    ultima    = _ultima_pubblicata(versions)
     any_error = False
     for ver in versions:
         major = ver.get("versionNumber", 0)
@@ -1307,8 +1339,9 @@ def process_doi(doi: str, output_root: Path) -> dict:
             modalita = "download"
         else:
             modalita = "solo_metadati"
-        vres = process_version(doi, ver, doi_dir, meta_dir,
-                               registri[major], modalita)
+        vres = process_version(
+            doi, ver, doi_dir, meta_dir, registri[major], modalita,
+            ultima_pubblicata=(major, ver.get("versionMinorNumber", 0)) == ultima)
         result["versions"].append(vres)
         if vres["status"] == "error":
             any_error = True
