@@ -7,7 +7,7 @@ Pipeline automatizzata per trasferire dataset da **Dataverse UNIMI**
 
 | Script | Descrizione |
 |---|---|
-| `scarica_dataverse.py` | Scarica dataset e metadati da Dataverse (tutte le versioni), conserva l'originale depositato dei file ingeriti come tabellari, verifica l'integrità di ogni file (checksum/dimensione) e li organizza in pacchetti compatibili con Archivematica |
+| `scarica_dataverse.py` | Scarica dataset e metadati da Dataverse (metadati di tutte le versioni pubblicate, file solo alla prima versione di ogni major, bozze escluse), conserva l'originale depositato dei file ingeriti come tabellari, verifica l'integrità di ogni file (checksum/dimensione) e li organizza in pacchetti compatibili con Archivematica |
 | `archivematica_ingest.py` | Trasferisce e ingesta i pacchetti in Archivematica con approvazione automatica del transfer |
 | `riconcilia_stato.py` | Riconcilia i pacchetti "failed" del file di stato con gli AIP realmente presenti nello Storage Service (es. dopo approvazioni manuali), evitando ingest duplicati |
 | `diagnostica_checksum.py` | *Diagnostica (sola lettura).* Verifica empiricamente, per i file ingeriti come tabellari, se il checksum del manifest si riferisce all'originale o alla derivata `.tab`. Non fa parte del flusso: è lo strumento che documenta la scelta di conservare gli originali e permette di ri-verificarla (nuove versioni Dataverse, audit, altri dataset) |
@@ -68,7 +68,8 @@ AM_PROCESSING_MCP_PATH=/home/zfed/arkive/config/dataverse_001ProcessingMCP.xml
 AM_AUTO_APPROVE=true
 AM_API_TIMEOUT=120          # timeout API in secondi (generoso: dataset grandi)
 
-SSL_VERIFY=false            # false per certificati self-signed
+SSL_VERIFY=false            # Archivematica: false per certificati self-signed
+DATAVERSE_SSL_VERIFY=true   # Dataverse: certificato valido (default true)
 
 LOG_DIR=logs                # cartella dove salvare i log di esecuzione
 ```
@@ -99,18 +100,27 @@ python3 riconcilia_stato.py             # applica
 ```
 <doi>/
   objects/
-    v1.0/
+    v1.0/               <- prima versione della major: file scaricati
       objects/          <- file del dataset
       metadata/
         dataverse.json  <- metadati Dataverse
         metadata.csv    <- Dublin Core (preservation)
+        files.json      <- manifest: id, nome corrente, checksum, dove sta il contenuto
         dcat.json       <- DCAT-AP JSON-LD (solo con --dcat o EXPORT_DCAT=true)
-        schema.json     <- Schema.org JSON-LD (solo con --dcat o EXPORT_DCAT=true)
-    v2.0/  ...
+    v1.1/               <- minor: solo metadati, nessuna cartella objects/
+      metadata/
+        ...             <- files.json rimanda a objects/v1.0/objects/
+        schema.json     <- Schema.org JSON-LD: solo l'ultima versione pubblicata
+    v2.0/  ...          <- nuova major: file scaricati
   metadata/
-    metadata.csv        <- Dublin Core tutte le versioni -> METS dmdSec
+    metadata.csv        <- Dublin Core dei file presenti -> METS dmdSec
   processingMCP.xml     <- processing configuration Archivematica
 ```
+
+Nelle minor release cambiano solo i metadati (verificato con
+`analizza_versioni.py`): i file si scaricano una volta per major. Se una minor
+contiene comunque un file nuovo o cambiato, viene scaricato e segnalato come
+`[ANOMALIA]`. Dettagli nel manuale, sezioni 4 e 6.
 
 ## File generati
 
@@ -128,7 +138,7 @@ Vedi `manuale_dataverse_archivematica.pdf` per il manuale completo.
 
 ## Note
 
-- I dataset vuoti (nessun file in nessuna versione) vengono rilevati automaticamente:
+- I dataset vuoti (nessun file in nessuna versione pubblicata) vengono rilevati automaticamente:
   la directory non viene creata e il DOI viene registrato in `doi_vuoti.json`
 - **Conservazione dell'originale per i file tabellari**: i file ingeriti da
   Dataverse (Stata, SPSS, CSV, xlsx…) vengono serviti di default come derivata

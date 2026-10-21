@@ -19,7 +19,7 @@ trasferimento di dataset da **Dataverse UNIMI** (`dataverse.unimi.it`) ad
 3. [Configurazione — file .env](#3-configurazione--file-env)
 4. [Script 1 — scarica_dataverse.py](#4-script-1--scarica_dataversepy)
 5. [Script 2 — archivematica_ingest.py](#5-script-2--archivematica_ingestpy)
-6. [Struttura del pacchetto generato](#6-struttura-del-pacchetto-generato)
+6. [Struttura del pacchetto e versioni del dataset](#6-struttura-del-pacchetto-e-versioni-del-dataset)
 7. [File di stato e report](#7-file-di-stato-e-report)
 8. [Risoluzione dei problemi comuni](#8-risoluzione-dei-problemi-comuni)
 9. [Esempio di esecuzione completa](#9-esempio-di-esecuzione-completa)
@@ -31,7 +31,7 @@ trasferimento di dataset da **Dataverse UNIMI** (`dataverse.unimi.it`) ad
 ```
  dois.txt                scarica_dataverse.py            Transfer Source
  (lista DOI)   -------->  - controlla se vuoto    -----> Location
-                          - scarica file                    (Archivematica)
+                          - scarica file (per major)        (Archivematica)
                           - genera metadati DC                   |
                           - genera dcat.json (opt.)              v
                           - scarica schema.json (opt.) archivematica_ingest.py
@@ -46,9 +46,11 @@ trasferimento di dataset da **Dataverse UNIMI** (`dataverse.unimi.it`) ad
 Il flusso tipico e':
 
 1. Si prepara `dois.txt` con l'elenco dei DOI da archiviare.
-2. Si esegue `scarica_dataverse.py`: scarica tutte le versioni di ciascun
-   dataset, controlla che non siano vuoti, e li organizza nella Transfer
-   Source Location di Archivematica.
+2. Si esegue `scarica_dataverse.py`: per ogni DOI recupera le versioni
+   pubblicate, controlla che il dataset contenga file e costruisce il pacchetto
+   nella Transfer Source Location di Archivematica. I metadati vengono conservati
+   per ogni versione, i file una sola volta per ciascuna major release
+   (sezione 6).
 3. Si esegue `archivematica_ingest.py`: avvia il transfer e l'ingest per
    ogni pacchetto non ancora processato, in modo completamente automatico.
 4. Lo stato viene salvato in file JSON per le esecuzioni successive.
@@ -84,10 +86,32 @@ sudo usermod -aG archivematica <utente>
 
 ### Note su SSL
 
-Se Archivematica usa un certificato self-signed, impostare `SSL_VERIFY=false`
-nel `.env` o usare `--no-verify-ssl` da riga di comando.
+La pipeline comunica con due servizi diversi, e la verifica del certificato
+si configura separatamente per ciascuno.
+
+**Archivematica.** Le installazioni locali e di test usano spesso un certificato
+self-signed, che la verifica standard rifiuterebbe. In questo caso si imposta
+`SSL_VERIFY=false` nel `.env`, oppure si usa `--no-verify-ssl` con
+`archivematica_ingest.py`.
+
+**Dataverse.** `dataverse.unimi.it` espone un certificato valido, firmato da
+un'autorità pubblica: la verifica deve restare attiva, ed è il comportamento
+predefinito. Gli script che interrogano Dataverse (`scarica_dataverse.py`,
+`analizza_versioni.py`, `verifica_raggiungibilita.py`, `censisci_archivi.py`,
+`diagnostica_checksum.py`) leggono una variabile propria, `DATAVERSE_SSL_VERIFY`,
+che vale `true` se non è impostata, e ignorano `SSL_VERIFY`.
+
+La separazione corregge un difetto delle versioni precedenti degli script. Con
+un'unica variabile, il `SSL_VERIFY=false` impostato per Archivematica nel `.env`
+condiviso disattivava anche la verifica verso Dataverse: le connessioni a
+`dataverse.unimi.it` partivano senza alcuna garanzia di raggiungere davvero quel
+server. Disattivare la verifica verso Dataverse ha senso solo in casi
+particolari, per esempio dietro un proxy che intercetta il traffico TLS: si
+imposta allora `DATAVERSE_SSL_VERIFY=false`, oppure si passa `--no-verify-ssl` a
+`scarica_dataverse.py`.
 
 URL tipici per le API:
+
 - Dashboard: `https://<host>` (porta 443)
 - Storage Service: `https://<host>:8000`
 
@@ -110,12 +134,17 @@ nano .env
 # API key (lasciare vuoto per dataset pubblici)
 DATAVERSE_API_KEY=
 
+# Verifica del certificato di dataverse.unimi.it. Il certificato e'
+# valido: lasciare true. Distinta da SSL_VERIFY (Archivematica).
+DATAVERSE_SSL_VERIFY=true
+
 # Cartella di destinazione (Transfer Source Location di Archivematica)
 # Recuperabile con: python3 archivematica_ingest.py --list-sources
 OUTPUT_DIR=/mnt/e/DROPBOX/Dropbox/_ARKIVE/TRANSFER_SOURCE
 
-# Esportazione DCAT-AP (dcat.json) e Schema.org (schema.json)
-# per ogni versione del dataset. Equivalente al flag --dcat da CLI.
+# Esportazione DCAT-AP (dcat.json, per ogni versione) e Schema.org
+# (schema.json, solo per l'ultima versione pubblicata).
+# Equivalente al flag --dcat da CLI.
 EXPORT_DCAT=false
 
 # ── Archivematica Dashboard ───────────────────────────────────
@@ -147,6 +176,8 @@ AM_AUTO_APPROVE=true
 AM_API_TIMEOUT=120
 
 # ── SSL ───────────────────────────────────────────────────────
+# Riguarda solo Archivematica (certificati self-signed).
+# Gli script che interrogano Dataverse usano DATAVERSE_SSL_VERIFY.
 SSL_VERIFY=false
 ```
 
@@ -198,20 +229,24 @@ echo ".env" >> .gitignore
 
 Per ogni DOI elencato in `dois.txt`:
 
-1. Recupera l'elenco di tutte le versioni pubblicate
-2. **Controlla se il dataset contiene file**: se e' vuoto, non crea la
-   directory e registra il DOI in `doi_vuoti.json`
-3. Per ciascuna versione:
-   - scarica tutti i file del dataset — per i file **ingeriti come tabellari**
-     scarica l'**originale** depositato (`format=original`), non la derivata
-     `.tab` — **verificando l'integrità** di ognuno contro il checksum (o la
-     dimensione) dichiarato da Dataverse
-   - salva i metadati Dataverse in `dataverse.json`
-   - genera `metadata.csv` Dublin Core per quella versione
-   - genera `dcat.json` (DCAT-AP JSON-LD) se `EXPORT_DCAT=true`
-   - scarica `schema.json` (Schema.org JSON-LD) se `EXPORT_DCAT=true`
-4. Genera un `metadata.csv` complessivo nella radice del pacchetto
-   (letto da Archivematica per il METS `dmdSec`)
+1. Recupera l'elenco delle versioni del dataset ed esclude l'eventuale bozza
+   (`DRAFT`), che non è una versione pubblicata (sezione 6).
+2. **Controlla se il dataset contiene file**: se è vuoto, non crea la
+   directory e registra il DOI in `doi_vuoti.json`.
+3. Per ciascuna versione pubblicata salva i metadati: `dataverse.json`, il
+   `metadata.csv` Dublin Core della versione, il manifest dei file
+   `files.json` e, se `EXPORT_DCAT=true`, `dcat.json` e `schema.json` (il
+   secondo solo per l'ultima versione pubblicata).
+4. Scarica i file **una sola volta per ciascuna major release**, nella prima
+   versione pubblicata della major (di norma `x.0`). Per i file **ingeriti come
+   tabellari** scarica l'**originale** depositato (`format=original`) e non la
+   derivata `.tab`, e **verifica l'integrità** di ogni file contro il checksum
+   (o la dimensione) dichiarato da Dataverse. Le minor release successive non
+   scaricano file: il loro `files.json` rimanda ai contenuti già conservati.
+   Il criterio, le sue ragioni e le sue garanzie sono descritti nella
+   sezione 6.
+5. Genera un `metadata.csv` complessivo nella radice del pacchetto, letto da
+   Archivematica per il METS `dmdSec`.
 
 ### Controllo dataset vuoti
 
@@ -222,7 +257,13 @@ contenga almeno un file. Se tutte le versioni sono prive di file:
 - il DOI viene registrato in `doi_vuoti.json` con data e motivo
 - il riepilogo mostra `Vuoti: N` nel conteggio finale
 
+Il controllo considera solo le versioni pubblicate. Con una API key, l'endpoint
+delle versioni restituisce anche la bozza aperta, ma questa viene esclusa prima
+del controllo: un dataset che ha file soltanto nella bozza risulta quindi vuoto,
+coerentemente con il fatto che quei file non sono ancora stati pubblicati.
+
 Cause tipiche di dataset vuoto:
+
 - dataset ancora in bozza (non ancora pubblicato)
 - accesso ristretto (embargo attivo)
 - dataset pubblicato ma senza file allegati
@@ -287,11 +328,25 @@ dello skip-se-esiste ed è deterministica, così il resume non crea doppioni.
 `metadata.csv` elenca i file annidati (via `rglob`), altrimenti il SIP
 risulterebbe incompleto.
 
-Il controllo che intercetta questa classe di errori è il confronto fra numero di
-file su disco e numero atteso dai metadati dell'API, applicato **per versione**:
-è l'unico che rileva una sovrascrittura, dato che download e verifica di
-integrità riportano comunque successo. Lo strumento `trova_da_riscaricare.py`
-automatizza il confronto sull'intero scope.
+Il controllo che intercetta questa classe di errori è il confronto fra il numero
+di file su disco e quello atteso secondo i metadati dell'API: è l'unico che
+rileva una sovrascrittura, dato che download e verifica di integrità riportano
+comunque successo. Lo strumento `trova_da_riscaricare.py` lo applica all'intero
+scope, prendendo il numero atteso dal report di `verifica_raggiungibilita.py`.
+
+Perché il confronto sia corretto, il report deve contare i file con la stessa
+regola con cui la pipeline li scarica: solo nella prima versione di ogni major,
+bozze escluse (sezione 6). I report prodotti prima di questa regola sommavano
+invece i file di tutte le versioni. Confrontato con un pacchetto attuale, un
+report del genere farebbe risultare incompleto ogni dataset con minor release,
+e `--elimina` ne cancellerebbe la cartella. Per evitarlo, ogni report registra
+il criterio con cui è stato calcolato (campo `criterio_volume`):
+
+- `trova_da_riscaricare.py`, se trova il criterio precedente, lo segnala e
+  rifiuta `--elimina`;
+- `prepara_lotti.py` avverte che i lotti risulterebbero sovradimensionati;
+- rilanciando `verifica_raggiungibilita.py` sulla stessa lista, i DOI calcolati
+  con il criterio precedente vengono ricalcolati automaticamente.
 
 ### Verifica di integrità dei file
 
@@ -374,11 +429,26 @@ rappresentazione di accesso (`.tab`), non necessariamente l'originale che la pip
 conserva: va inteso come copia fedele di ciò che il repository pubblica, non come
 descrizione dell'AIP.
 
-È inoltre presente **solo nella cartella dell'ultima versione**: l'exporter
-Schema.org lavora a livello di dataset e non espone le versioni storiche. La sua
-assenza in `objects/v1.0/metadata/`, `v2.0/metadata/` ecc. **non è un errore**;
-`dataverse.json`, `dcat.json` e `metadata.csv`, generati localmente, ci sono invece
-per ogni versione.
+È inoltre presente **solo nella cartella dell'ultima versione pubblicata**. Il
+limite viene da Dataverse: l'API di export (`/api/datasets/export`) restituisce
+soltanto l'ultima versione pubblicata, e per ogni versione precedente
+Dataverse 6.10.1 risponde con un errore `400`:
+
+```
+Non-draft version requested (1.0) but for published versions only the
+latest (:latest-published) is supported.
+```
+
+Lo script quindi chiede l'export solo per l'ultima versione e per le altre lo
+segnala a log con `[INFO] schema.json non prodotto`: l'assenza di `schema.json`
+in `objects/v1.0/metadata/`, `v2.0/metadata/` ecc. **non è un errore**.
+Generarlo localmente per le versioni precedenti sarebbe possibile, ma il
+risultato sarebbe una nostra ricostruzione dell'exporter di Dataverse, non la
+sua vista autentica, che è proprio ciò che `schema.json` deve documentare.
+
+Lo stesso limite riguarda l'export nativo di Dataverse conservato in
+`dataverse.json` (sezione 6, "I metadati di ogni versione"). `dcat.json` e
+`metadata.csv`, generati localmente, ci sono invece per ogni versione.
 
 ### Opzioni da riga di comando
 
@@ -387,7 +457,7 @@ per ogni versione.
 | `--dois <file>` | `dois.txt` | File con l'elenco dei DOI |
 | `--output <cartella>` | dal `.env` (OUTPUT_DIR) | Cartella di destinazione |
 | `--apikey <chiave>` | dal `.env` | API key Dataverse |
-| `--no-verify-ssl` | `false` | Disabilita verifica SSL |
+| `--no-verify-ssl` | `false` | Disabilita la verifica SSL verso Dataverse (come `DATAVERSE_SSL_VERIFY=false`) |
 | `--dcat` | `false` | Abilita esportazione DCAT-AP e Schema.org |
 
 ### Esempi
@@ -403,54 +473,99 @@ python3 scarica_dataverse.py --dcat
 python3 scarica_dataverse.py \
   --output /mnt/e/DROPBOX/Dropbox/_ARKIVE/TRANSFER_SOURCE
 
-# Con certificato self-signed
+# Senza verifica SSL verso Dataverse (solo casi particolari,
+# es. proxy che intercetta TLS: vedi "Note su SSL")
 python3 scarica_dataverse.py --no-verify-ssl
 ```
 
 ### Output a schermo
 
+L'esempio riguarda due DOI: il primo ha una versione `v1.0`, una minor `v1.1`
+in cui un file è stato rinominato e una bozza aperta; il secondo è vuoto.
+
 ```
 ==============================================================
-  Dataverse UNIMI -- Download automatico (tutte le versioni)
-  Sorgente DOI : dois.txt (3 DOI)
+  Dataverse UNIMI — Download automatico (file alle major release)
+  Sorgente DOI : dois.txt (2 DOI)
   Destinazione : /mnt/.../TRANSFER_SOURCE
   API key      : ******5678
-  SSL verify   : False
+  SSL Dataverse: True
   Export DCAT  : True
 ==============================================================
 
-[1/3] DOI: doi:10.13130/RD_UNIMI/KS2PUX
-  --> Recupero lista versioni...
-  --> 1 versione/i trovata/e: v1.0
-  -- Versione v1.0 [RELEASED]
+[1/2] DOI: doi:10.13130/RD_UNIMI/ESEMPIO
+  → Recupero lista versioni...
+  [INFO] Bozza (DRAFT) presente: esclusa dal download.
+  → 2 versione/i trovata/e: v1.0, v1.1
+  ── Versione v1.0 [RELEASED] — download
+    [metadata] dataverse.json salvato
+    [metadata] dcat.json generato
+    [INFO] schema.json non prodotto: l'export Schema.org di Dataverse
+           e' disponibile solo per l'ultima versione pubblicata
+    [data] 2 file trovati, inizio download...
+      Scarico: README.txt ...
+OK (2 KB)
+      Scarico: 1960_1969_ivt_ar.nc ...
+OK (46 KB)
+    [metadata] files.json generato (2 file, 0 rimandati a versioni
+               precedenti)
+    [metadata] metadata.csv (versione) generato (2 righe)
+  ── Versione v1.1 [RELEASED] — solo metadati (contenuti in v1.0)
     [metadata] dataverse.json salvato
     [metadata] dcat.json generato
     [metadata] schema.json salvato
-    [data] 4 file trovati, inizio download...
-      Scarico: works.tab ... OK (25 KB)
+    [data] 2 file: nessun download previsto, verifica rispetto a v1.0...
+      [rinomina] id 382839: '1960_1969_ivt_ar.nc'
+                 -> '1961_1969_ivt_ar.nc'
+                 (contenuto in objects/v1.0/objects/1960_1969_ivt_ar.nc)
+    [metadata] files.json generato (2 file, 2 rimandati a versioni
+               precedenti)
     [metadata] metadata.csv (versione) generato (1 righe)
-  [metadata] metadata.csv generato (1 righe, 1 versione/i)
-  [validazione] metadata.csv OK
-  OK Stato: ok | Versioni: 1 | File OK: 4 | Errori: 0
+  [metadata] metadata.csv generato (2 righe, 2 versione/i)
+  [validazione] metadata.csv OK — nessun problema rilevato.
+  ✓ Stato: ok | Versioni: 2 | File scaricati/presenti: 2 | Rimandati: 2
+    | Errori file: 0 | Bozza esclusa
 
-[2/3] DOI: doi:10.13130/RD_UNIMI/VUOTO
-  --> Recupero lista versioni...
-  --> 1 versione/i trovata/e: v1.0
+[2/2] DOI: doi:10.13130/RD_UNIMI/VUOTO
+  → Recupero lista versioni...
   [INFO] Dataset vuoto: 1 versione/i trovata/e ma nessun file presente
+         (dataset vuoto o accesso ristretto)
   [INFO] Directory non creata.
-  O Stato: empty | Versioni: 0 | File OK: 0 | Errori: 0
+  ○ Stato: empty | Versioni: 0 | File scaricati/presenti: 0
+    | Rimandati: 0 | Errori file: 0
   Motivo: 1 versione/i trovata/e ma nessun file presente
+          (dataset vuoto o accesso ristretto)
 
 ==============================================================
   RIEPILOGO FINALE
-  Completati  : 2
+  Completati  : 1
   Parziali    : 0
   Errori      : 0
   Vuoti       : 1
+  Con anomalie: 0
   Riepilogo   : .../riepilogo_download.json
   DOI vuoti   : .../doi_vuoti.json
 ==============================================================
 ```
+
+Le righe più lunghe sono state spezzate per la stampa; a terminale ciascuna
+occupa una sola riga. L'esito di ogni download (`OK`, `ERRORE`) compare invece
+davvero sulla riga successiva a `Scarico:`, perché il log scrive ogni messaggio
+su una riga propria.
+
+La riga di stato di ogni DOI riassume l'esito:
+
+- **File scaricati/presenti** conta i file conservati nel pacchetto a fine
+  esecuzione, sia scaricati in questo run sia già presenti e integri;
+- **Rimandati** conta i file delle minor release che rimandano a un contenuto
+  conservato nella versione di riferimento della major (sezione 6);
+- **Anomalie: N** compare solo se una minor non ha rispettato la regola
+  (sezione 6, "Quando la regola non vale");
+- **Bozza esclusa** compare se il dataset ha una bozza aperta.
+
+Le righe `[INFO] schema.json non prodotto` sono attese per ogni versione che non
+è l'ultima pubblicata. Nel riepilogo finale, **Con anomalie** conta i DOI con
+almeno un'anomalia: un valore diverso da zero va sempre esaminato.
 
 ### Comportamento idempotente
 
@@ -464,8 +579,15 @@ Lo script può essere rieseguito senza duplicare il lavoro già fatto:
   un'interruzione. Nota: i file ingeriti sono riconosciuti per **nome originale**
   (`02500.csv`), quindi cartelle popolate da run precedenti a questa modifica —
   che contengono i vecchi `.tab` — non vengono riconosciute (vedi troubleshooting)
+- Minor release: non scaricano file, quindi rieseguirle non comporta download.
+  Fa eccezione il recupero: se un file non era stato ottenuto nella versione di
+  riferimento della major, la minor successiva ne ritenta il download
+  (sezione 6)
 - `dataverse.json`, `dcat.json`, `schema.json`, `metadata.csv` di versione:
   generati solo se mancanti
+- `files.json` di versione: **sempre rigenerato**, perché descrive i percorsi
+  effettivamente presenti sul disco, che cambiano quando un download prima
+  fallito va a buon fine
 - `metadata.csv` complessivo: **sempre rigenerato**
 - `doi_vuoti.json`: **aggiornato incrementalmente** (le voci precedenti
   vengono preservate, non sovrascritte)
@@ -717,44 +839,466 @@ python3 archivematica_ingest.py --processing-mcp-path ~/arkive/config/dataverse_
 
 ---
 
-## 6. Struttura del pacchetto generato
+## 6. Struttura del pacchetto e versioni del dataset
+
+Un dataset Dataverse non è un oggetto fisso: nel tempo riceve nuove versioni,
+e il pacchetto preparato per Archivematica deve conservarle tutte. Questa
+sezione spiega prima come Dataverse gestisce le versioni, poi come la pipeline
+le riporta nel pacchetto: che cosa scarica a ogni passaggio di versione, e
+perché; come si collega ogni versione ai file conservati; come si ricostruisce
+una versione; che cosa succede quando un dataset non rispetta la regola.
+
+### Versioni, major e minor release in Dataverse
+
+Le versioni di un dataset sono numerate `major.minor`. Ogni modifica a un
+dataset pubblicato apre una **bozza** (`DRAFT`); al momento della
+pubblicazione la bozza diventa una nuova versione, e chi pubblica sceglie se
+numerarla come **minor release** (da `1.0` a `1.1`) o come **major release**
+(da `1.1` a `2.0`).
+
+La scelta non è del tutto libera. Dataverse impone una major release quando
+nella bozza sono stati **aggiunti o rimossi file**, oppure quando la versione
+precedente era stata ritirata; negli altri casi lascia scegliere. Per capire
+che cosa può cambiare in una minor release serve il modello dati di
+Dataverse, che descrive un file su due livelli:
+
+- il **file vero e proprio** (`dataFile`), con il suo identificativo
+  `dataFile.id`, il contenuto e il checksum. È condiviso da tutte le versioni
+  in cui il file compare e resta lo stesso finché il file non viene sostituito;
+- i **metadati del file in una versione**: il nome (`label`), la cartella
+  (`directoryLabel`), la descrizione. Appartengono alla singola versione e
+  possono cambiare anche in una minor release.
+
+Ne segue che fra due versioni della stessa major lo stesso `dataFile.id`
+indica lo stesso contenuto, anche se nel frattempo il file ha cambiato nome o
+cartella.
+
+La regola è stata verificata sul corpus con `analizza_versioni.py`, sui 717
+DOI della lista del 30/09/2026. Su 523 passaggi da una versione alla minor
+successiva, nessuno ha aggiunto, rimosso o modificato un file. Gli unici
+cambiamenti sui file sono stati 11 **rinomine o spostamenti** (cambi di
+`label` o `directoryLabel`), in 7 dataset. Resta un caso che la documentazione
+di Dataverse non regola in modo esplicito: la **sostituzione** di un file
+(*Replace*), che produce un nuovo `dataFile.id`. Nel corpus non compare in
+nessuna minor release, ma la pipeline la intercetterebbe comunque (vedi
+"Quando la regola non vale").
+
+Due stati richiedono un trattamento a parte:
+
+- **Bozze.** Con una API key, l'endpoint delle versioni restituisce anche la
+  bozza aperta, se c'è: nella lista del 30/09/2026 ne avevano una 28 dataset.
+  La bozza non è una versione pubblicata, non ha un numero e può ancora
+  cambiare: la pipeline la esclude e non la conserva. Le versioni precedenti
+  dello script la scaricavano in una cartella `v0.0`.
+- **Versioni ritirate.** Le versioni `DEACCESSIONED` sono per ora elaborate
+  come le altre e segnalate a log con `[AVVISO]`. Il loro trattamento è ancora
+  da decidere.
+
+### Il criterio: che cosa si scarica a ogni versione
+
+Per ogni versione pubblicata la pipeline decide che cosa scaricare in base al
+tipo di passaggio rispetto alla versione precedente: passaggio di major o
+passaggio di minor. Le due modalità differiscono per un solo aspetto, ma
+decisivo: i metadati si scaricano sempre, i file solo a ogni nuova major.
+
+**Passaggio di major: metadati e file.** Cambia il numero prima del punto
+(`1.2` → `2.0`); vale come passaggio di major anche la prima versione
+pubblicata del dataset (`1.0`). La versione apre una nuova major e ne diventa
+la *versione di riferimento*. La pipeline scarica:
+
+- i **metadati** della versione, in `objects/vX.Y/metadata/`: `dataverse.json`,
+  `metadata.csv`, `files.json` e, se abilitati, `dcat.json` e `schema.json`;
+- **tutti i file** del dataset in quella versione, in `objects/vX.Y/objects/`,
+  con le regole della sezione 4: originale per i file tabellari, verifica di
+  integrità contro il checksum, struttura a cartelle di `directoryLabel`.
+
+Nei log e in `riepilogo_download.json` questa modalità si chiama `download`.
+
+**Passaggio di minor: solo metadati.** Cambia solo il numero dopo il punto
+(`2.0` → `2.1` → `2.2`): la versione appartiene a una major già conservata.
+La pipeline scarica:
+
+- i **metadati** della versione, in `objects/vX.Y/metadata/`, esattamente come
+  per una major;
+- **nessun file**: la cartella `objects/vX.Y/objects/` non viene creata. Al suo
+  posto il manifest `files.json` elenca i file della versione e indica, per
+  ciascuno, dove è conservato il contenuto, cioè nella versione di
+  riferimento della major.
+
+Nei log e in `riepilogo_download.json` questa modalità si chiama
+`solo_metadati`. Fanno eccezione i soli casi di salvaguardia, in cui un file
+viene scaricato anche in una minor (vedi "Quando la regola non vale").
+
+Un esempio con sei versioni pubblicate e una bozza aperta:
+
+| Versione | Passaggio | Modalità | Metadati | File |
+|---|---|---|---|---|
+| `v1.0` | prima versione | `download` | scaricati | scaricati |
+| `v1.1` | minor | `solo_metadati` | scaricati | rimando a `v1.0` |
+| `v1.2` | minor | `solo_metadati` | scaricati | rimando a `v1.0` |
+| `v2.0` | major | `download` | scaricati | scaricati |
+| `v2.1` | minor | `solo_metadati` | scaricati | rimando a `v2.0` |
+| `v3.0` | major | `download` | scaricati | scaricati |
+| bozza | — | esclusa | no | no |
+
+In termini operativi, lo script ordina le versioni pubblicate per numero
+(`versionNumber`, poi `versionMinorNumber`), dopo aver escluso le bozze, e le
+elabora dalla più vecchia alla più recente. La prima versione che incontra per
+ciascun valore di `versionNumber` è la versione di riferimento di quella major
+ed è elaborata in modalità `download`; tutte le successive con lo stesso
+`versionNumber` sono elaborate in modalità `solo_metadati`. La versione di
+riferimento è di norma la `x.0`; se questa non compare fra le versioni
+pubblicate, il ruolo passa alla prima minor disponibile della stessa major, che
+scarica quindi i file.
+
+Il criterio ha due conseguenze da tenere presenti.
+
+- **Decide il numero di versione, non il contenuto.** Dataverse permette di
+  pubblicare come major anche una versione che cambia solo i metadati. In quel
+  caso la pipeline scarica comunque tutti i file, che risulteranno identici a
+  quelli della major precedente. È un costo accettato: la major è il solo
+  passaggio in cui Dataverse ammette modifiche ai file, e scaricare a ogni
+  major garantisce che ciascuna contenga tutti i propri file.
+- **Le minor vengono comunque verificate.** Decidere in base al numero non
+  significa fidarsi alla cieca della regola: in ogni minor i file dichiarati da
+  Dataverse vengono confrontati con quelli della versione di riferimento, per
+  `dataFile.id` e checksum, e ogni differenza viene scaricata e segnalata
+  (vedi "Quando la regola non vale").
+
+### Perché i file si scaricano una volta per major
+
+Fino alla versione precedente, la pipeline scaricava i file di ogni versione
+nella cartella di quella versione. Un file invariato fra `v1.0` e `v1.1`
+veniva quindi scaricato due volte e finiva due volte nell'AIP: due copie
+identiche, ognuna caratterizzata da Archivematica, ognuna con il proprio
+record PREMIS. Nessuna informazione in più, ma più spazio, più tempo di
+download e di ingest, e un AIP più difficile da leggere, in cui lo stesso
+contenuto compare come oggetti distinti.
+
+Poiché nelle minor release i file non cambiano, scaricarli a ogni versione non
+aggiunge nulla. Con il criterio attuale ogni contenuto è conservato una sola
+volta per major, nella versione di riferimento, e le minor ne conservano
+soltanto i metadati e il manifest che vi rimanda.
+
+Sui 717 DOI della lista del 30/09/2026 l'effetto stimato con
+`analizza_versioni.py` è il seguente:
+
+| Criterio | File scaricati | Volume |
+|---|---:|---:|
+| Tutte le versioni (precedente) | 194.898 | 1.376 GB |
+| Una volta per major (attuale) | 159.344 | 965 GB |
+
+La deduplicazione si ferma alla major release, per scelta. Un file invariato
+fra `v1.0` e `v2.0` viene scaricato in entrambe: in questo modo ogni major
+contiene tutti i propri file e non dipende dalle cartelle delle major
+precedenti. Una deduplicazione per checksum sull'intero dataset ridurrebbe
+ancora il volume (`analizza_versioni.py` ne stima anche questo scenario), ma
+legherebbe ogni major ai contenuti di quelle precedenti. La granularità per
+major è un compromesso fra risparmio di spazio e semplicità del pacchetto.
+
+### Struttura del pacchetto
+
+Esempio con un dataset a due major, ciascuna seguita da una minor:
 
 ```
 TRANSFER_SOURCE/
-  doi_10.13130_RD_UNIMI_KS2PUX/
+  doi_10.13130_RD_UNIMI_XXXXXX/
     objects/
-      v1.0/
-        objects/                    <- file del dataset
-          works.tab
+      v1.0/                 <- riferimento major 1: file scaricati
+        objects/            <- file del dataset
+          dati.csv
           README.txt
-        metadata/                   <- metadati di questa versione
-          dataverse.json            <- metadati Dataverse (preservation)
-          metadata.csv              <- Dublin Core di questa versione
-          dcat.json                 <- DCAT-AP JSON-LD (solo se EXPORT_DCAT=true)
-          schema.json               <- Schema.org JSON-LD (solo se EXPORT_DCAT=true)
-      v2.0/
-        objects/
-          works_v2.tab
+        metadata/           <- metadati di questa versione
+          dataverse.json    <- metadati Dataverse (preservation)
+          metadata.csv      <- Dublin Core della versione
+          files.json        <- manifest dei file della versione
+          dcat.json         <- DCAT-AP (se EXPORT_DCAT=true)
+      v1.1/                 <- minor: solo metadati, niente objects/
         metadata/
           dataverse.json
           metadata.csv
-          dcat.json                 <- (solo se EXPORT_DCAT=true)
-          schema.json               <- (solo se EXPORT_DCAT=true)
+          files.json        <- rimanda a objects/v1.0/objects/
+          dcat.json
+      v2.0/                 <- riferimento major 2: file scaricati
+        objects/
+          dati.csv
+          README.txt
+          nuovo.csv
+        metadata/
+          ...               <- come in v1.0
+      v2.1/                 <- minor, ultima versione pubblicata
+        metadata/
+          dataverse.json    <- con l'export Dataverse completo
+          metadata.csv
+          files.json        <- rimanda a objects/v2.0/objects/
+          dcat.json
+          schema.json       <- solo nell'ultima versione pubblicata
     metadata/
-      metadata.csv                  <- Dublin Core TUTTE le versioni -> METS dmdSec
-    processingMCP.xml               <- copiato da archivematica_ingest.py
-  riepilogo_download.json           <- riepilogo scaricamenti
-  doi_vuoti.json                    <- DOI senza file (aggiornato incrementalmente)
+      metadata.csv          <- Dublin Core dei file presenti (METS)
+    processingMCP.xml       <- copiato da archivematica_ingest.py
+  riepilogo_download.json   <- riepilogo scaricamenti
+  doi_vuoti.json            <- DOI senza file
 ```
+
+Ogni versione pubblicata ha la propria cartella `objects/vX.Y/` con i propri
+metadati in `metadata/`. Solo le versioni di riferimento hanno anche la
+cartella dei file `objects/vX.Y/objects/`. Una minor release la ha soltanto in
+caso di anomalia, e in quel caso contiene solo i file scaricati per
+salvaguardia (vedi "Quando la regola non vale").
+
+Tutto ciò che sta sotto `objects/` entra nell'AIP come oggetto conservato,
+compresi i metadati delle versioni e i manifest `files.json`. È questo che
+rende l'AIP autosufficiente: per sapere quali file compongono una versione, e
+con quali nomi, non serve interrogare Dataverse.
+
+### Il manifest files.json
+
+Ogni versione, major o minor, ha in `objects/vX.Y/metadata/` un `files.json`:
+l'elenco dei file della versione così come Dataverse li presenta, con
+l'indicazione del punto del pacchetto in cui ciascun contenuto è conservato.
+Nelle versioni di riferimento il manifest rimanda alla versione stessa; nelle
+minor rimanda alla versione di riferimento della major.
+
+L'esempio è il manifest della `v1.1` del dataset usato nell'output a schermo
+della sezione 4, in cui uno dei due file è stato rinominato:
+
+```json
+{
+  "doi": "doi:10.13130/RD_UNIMI/ESEMPIO",
+  "versione": "v1.1",
+  "modalita": "solo_metadati",
+  "versione_riferimento": "v1.0",
+  "nota": "...",
+  "file": [
+    {
+      "id": 382838,
+      "label": "README.txt",
+      "directoryLabel": null,
+      "checksum": {
+        "tipo": "md5",
+        "valore": "7f91ea97aa0d48689b660185635444e2"
+      },
+      "nome_su_disco": "README.txt",
+      "percorso_contenuto": "objects/v1.0/objects/README.txt",
+      "versione_contenuto": "v1.0",
+      "rappresentazione": "nativo",
+      "rinominato": false
+    },
+    {
+      "id": 382839,
+      "label": "1961_1969_ivt_ar.nc",
+      "directoryLabel": null,
+      "checksum": {
+        "tipo": "md5",
+        "valore": "a9f614ebb9cbec1deee04f04724df190"
+      },
+      "nome_su_disco": "1960_1969_ivt_ar.nc",
+      "percorso_contenuto": "objects/v1.0/objects/1960_1969_ivt_ar.nc",
+      "versione_contenuto": "v1.0",
+      "rappresentazione": "nativo",
+      "rinominato": true
+    }
+  ]
+}
+```
+
+In testa al file, `modalita` dice se la versione ha scaricato i file
+(`download`) o rimanda ad altre versioni (`solo_metadati`), e
+`versione_riferimento` indica la versione di riferimento della major. Per ogni
+file, l'elenco `file` riporta:
+
+`id`
+
+:   Il `dataFile.id` di Dataverse. È la chiave che collega le occorrenze di un
+    file nelle diverse versioni: lo stesso `id` indica lo stesso contenuto.
+
+`label`, `directoryLabel`
+
+:   Nome e cartella del file **in questa versione**, come li mostra Dataverse.
+
+`checksum`
+
+:   Algoritmo e valore dichiarati da Dataverse. Permettono di verificare che il
+    contenuto indicato da `percorso_contenuto` sia davvero quello del file.
+
+`nome_su_disco`, `percorso_contenuto`
+
+:   Nome e percorso, relativo alla radice del pacchetto, con cui il contenuto
+    è salvato. Possono differire da `label` per due motivi: il file è stato
+    rinominato dopo il download, oppure è un file tabellare di cui si conserva
+    l'originale con il suo nome (`dati.dta` anziché `dati.tab`, vedi
+    "Conservazione dell'originale" nella sezione 4). Valgono `null` se il
+    download non è riuscito.
+
+`versione_contenuto`
+
+:   Versione in cui il contenuto è stato scaricato.
+
+`rappresentazione`
+
+:   Quale rappresentazione è conservata: `nativo` per i file non ingeriti,
+    `originale` per i tabellari scaricati con `format=original`,
+    `derivata_tab` quando si è dovuto ripiegare sulla derivata.
+
+`rinominato`
+
+:   `true` se `label` o `directoryLabel` sono cambiati rispetto alla versione
+    in cui il contenuto è stato scaricato.
+
+Il manifest viene rigenerato a ogni esecuzione, perché descrive i percorsi
+effettivamente presenti sul disco.
+
+### Rinomine e spostamenti di file
+
+Una rinomina in una minor release non comporta un nuovo download. Il contenuto
+resta salvato con il nome che aveva nella versione di riferimento; il manifest
+della minor riporta il nome nuovo in `label`, quello su disco in
+`nome_su_disco`, e `rinominato: true`. Lo stesso vale per uno spostamento di
+cartella (`directoryLabel`): il contenuto resta nella cartella in cui è stato
+scaricato.
+
+Il log segnala ogni rinomina con una riga `[rinomina]`. Un caso reale viene dal
+dataset GR9D83, dove nella `v2.1` è stato corretto l'intervallo di anni nel
+nome di un file NetCDF:
+
+```
+[rinomina] id 382839: '1960_1969_ivt_ar.nc' -> '1961_1969_ivt_ar.nc'
+           (contenuto in objects/v2.0/objects/1960_1969_ivt_ar.nc)
+```
+
+Il checksum è rimasto lo stesso: è cambiato solo il nome, e il contenuto
+conservato in `v2.0` è quello giusto anche per la `v2.1`.
+
+Fra due major release i file vengono invece scaricati di nuovo, con il nome
+che hanno nella nuova versione. Anche qui `files.json` aiuta a leggere le
+differenze. In DP08SC `v3.0`, per esempio, il file che Dataverse mostra come
+`IVD_NMBU shipment 3_preliminary data_AAquantification.tab` è salvato come
+`IVD_NMBU shipment 2_preliminary data_AAquantification.xlsx`. È un file
+tabellare: la pipeline ne conserva l'originale depositato, che porta il nome
+con cui era stato caricato, mentre il `label` è stato rinominato in seguito.
+
+### Ricostruire una versione dal pacchetto
+
+Il pacchetto conserva tutte le versioni pubblicate, ma le minor release non
+contengono file. Per ottenere il contenuto completo di una versione si segue
+il suo manifest:
+
+1. si apre `objects/vX.Y/metadata/files.json` della versione desiderata;
+2. per ogni voce dell'elenco `file`, il contenuto si trova in
+   `percorso_contenuto`, relativo alla radice del pacchetto;
+3. il file va presentato con il nome e la cartella della versione,
+   cioè `directoryLabel` e `label`, non con `nome_su_disco`;
+4. se serve una verifica, il checksum del contenuto deve coincidere con
+   `checksum.valore`.
+
+Nell'esempio precedente, la `v1.1` si ricostruisce così:
+
+| File della `v1.1` | Contenuto da prendere |
+|---|---|
+| `README.txt` | `objects/v1.0/objects/README.txt` |
+| `1961_1969_ivt_ar.nc` | `objects/v1.0/objects/1960_1969_ivt_ar.nc` |
+
+Per i file tabellari il contenuto è l'originale depositato
+(`rappresentazione: originale`): se il `label` termina in `.tab`, il file
+ricostruito è comunque l'originale, non la derivata che Dataverse serve di
+default. È la conseguenza voluta della scelta di conservazione descritta nella
+sezione 4.
+
+Poiché manifest e file stanno sotto `objects/`, la stessa procedura vale
+sull'AIP: la ricostruzione non richiede di interrogare Dataverse.
+
+### Quando la regola non vale
+
+La regola delle minor release è garantita da Dataverse solo in parte (per
+aggiunte e rimozioni di file) ed è stata verificata empiricamente per il
+resto. La pipeline quindi non la dà per scontata: in ogni minor confronta i
+file con quelli della versione di riferimento, per `dataFile.id` e checksum, e
+tratta ogni scostamento in modo da non perdere dati.
+
+**File con `id` assente dalla versione di riferimento.** È un file che la
+major non conteneva. Viene scaricato nella minor, in `objects/vX.Y/objects/`, e
+il log riporta un `[ANOMALIA]` di tipo `file_assente_dal_riferimento`.
+
+**File con lo stesso `id` ma checksum diverso.** Il contenuto risulta cambiato.
+Anche in questo caso il file viene scaricato nella minor, con un `[ANOMALIA]`
+di tipo `contenuto_cambiato`.
+
+**File presente nella versione precedente e assente in questa.** Non c'è nulla
+da scaricare, perché il contenuto resta conservato nella versione da cui
+proviene. Il caso viene comunque registrato come `[ANOMALIA]` di tipo
+`file_rimosso`, perché anche questo smentisce la regola.
+
+**Download fallito nella versione di riferimento.** Non è un'anomalia della
+regola ma un errore di rete o di integrità. La minor successiva ritenta il
+download e lo segnala con `[AVVISO]`; se riesce, il contenuto viene conservato
+nella cartella della minor e il manifest punta lì.
+
+Le anomalie compaiono nel log, nella riga di stato del DOI (`Anomalie: N`), nel
+riepilogo finale (`Con anomalie: N`) e in `riepilogo_download.json`, con tipo,
+`dataFile.id` e percorso di ogni file coinvolto. Sul corpus attuale non se ne
+attendono. Un valore diverso da zero non indica un errore della pipeline, ma
+un dataset che non rispetta la regola, e va esaminato caso per caso (vedi
+sezione 8, "[ANOMALIA] in una minor release").
+
+### I metadati di ogni versione
+
+Ogni versione, major o minor, ha la propria cartella `metadata/` con questi
+file:
+
+`dataverse.json`
+
+:   I metadati della versione nel formato nativo di Dataverse, in due parti.
+    `version_metadata` è la descrizione completa della versione restituita
+    dall'endpoint delle versioni: blocchi di metadati ed elenco dei file con i
+    loro metadati. `dataverse_export` è l'export `dataverse_json` del dataset,
+    che per il limite dell'API di export descritto nella sezione 4 è presente
+    solo nell'ultima versione pubblicata; nelle altre vale `null`, e il campo
+    `dataverse_export_nota` ne spiega il motivo. I metadati della versione non
+    vanno persi: sono interamente in `version_metadata`.
+
+`metadata.csv`
+
+:   Dublin Core della versione. Nelle versioni di riferimento contiene una
+    riga per file; nelle minor release, che non hanno file propri, una sola
+    riga riferita alla versione nel suo complesso.
+
+`files.json`
+
+:   Il manifest dei file descritto sopra.
+
+`dcat.json`
+
+:   DCAT-AP JSON-LD generato localmente, solo se `EXPORT_DCAT=true`.
+
+`schema.json`
+
+:   Schema.org JSON-LD esportato da Dataverse, solo se `EXPORT_DCAT=true` e
+    solo per l'ultima versione pubblicata.
+
+"Ultima versione pubblicata" si intende al momento del download. Se in seguito
+il dataset riceve una nuova versione, un'esecuzione successiva crea la cartella
+della nuova versione, mentre quella precedente mantiene il proprio
+`schema.json` e il proprio `dataverse_export`. Erano corretti per quella
+versione quando sono stati esportati, e i file di metadati già presenti non
+vengono riscritti.
 
 ### Formato metadata.csv (radice del pacchetto)
 
-| filename | dc.title | dc.creator | dc.date | dc.identifier | ... |
-|---|---|---|---|---|---|
-| `objects/v1.0/objects/works.tab` | Titolo | Autore | 2026-03-04 | doi:10.13130/... | ... |
-| `objects/v2.0/objects/works_v2.tab` | Titolo | Autore | 2026-03-04 | doi:10.13130/... | ... |
+Il `metadata.csv` nella cartella `metadata/` alla radice del pacchetto è il
+file che Archivematica legge durante il transfer e traspone nel `METS.xml` come
+`<dmdSec MDTYPE="DC">`. Contiene una riga per ogni file **fisicamente
+presente** nel pacchetto: i file delle versioni di riferimento e gli eventuali
+file scaricati per anomalia in una minor release.
 
-Archivematica traspone questi metadati nel `METS.xml` come `<dmdSec MDTYPE="DC">`.
+| filename | dc.title | dc.identifier | ... |
+|---|---|---|---|
+| `objects/v1.0/objects/dati.csv` | Titolo | doi:10.13130/... | ... |
+| `objects/v2.0/objects/dati.csv` | Titolo | doi:10.13130/... | ... |
+| `objects/v2.0/objects/nuovo.csv` | Titolo | doi:10.13130/... | ... |
+
+Le minor release senza file non compaiono: una riga che indicasse una cartella
+inesistente non avrebbe un oggetto a cui riferirsi. I loro metadati Dublin Core
+restano nel `metadata.csv` della versione, in `objects/vX.Y/metadata/`.
 
 ---
 
@@ -762,26 +1306,81 @@ Archivematica traspone questi metadati nel `METS.xml` come `<dmdSec MDTYPE="DC">
 
 ### riepilogo_download.json
 
-Generato da `scarica_dataverse.py`. Riepilogo completo di ogni DOI:
+Generato da `scarica_dataverse.py` nella cartella di destinazione, con il
+riepilogo completo di ogni DOI dell'ultima esecuzione. L'esempio è la voce del
+primo DOI dell'output a schermo della sezione 4; per un DOI vuoto `versions` è
+un elenco vuoto e `empty_reason` ne riporta il motivo, come in `doi_vuoti.json`:
 
 ```json
 [
   {
-    "doi": "doi:10.13130/RD_UNIMI/KS2PUX",
+    "doi": "doi:10.13130/RD_UNIMI/ESEMPIO",
     "status": "ok",
-    "versions": [{"version": "v1.0", "files_ok": 4, "files_err": 0}],
+    "versions": [
+      {
+        "version": "v1.0",
+        "state": "RELEASED",
+        "modalita": "download",
+        "versione_riferimento": "v1.0",
+        "status": "ok",
+        "files_ok": 2,
+        "files_riferiti": 0,
+        "files_err": 0,
+        "anomalie": [],
+        "error": null
+      },
+      {
+        "version": "v1.1",
+        "state": "RELEASED",
+        "modalita": "solo_metadati",
+        "versione_riferimento": "v1.0",
+        "status": "ok",
+        "files_ok": 0,
+        "files_riferiti": 2,
+        "files_err": 0,
+        "anomalie": [],
+        "error": null
+      }
+    ],
     "error": null,
-    "empty_reason": null
-  },
-  {
-    "doi": "doi:10.13130/RD_UNIMI/VUOTO",
-    "status": "empty",
-    "versions": [],
-    "error": null,
-    "empty_reason": "1 versione/i trovata/e ma nessun file presente"
+    "empty_reason": null,
+    "bozze_escluse": 1,
+    "anomalie": 0
   }
 ]
 ```
+
+A livello di DOI, oltre allo stato complessivo (`status`: `ok`, `partial`,
+`error`, `empty`), il file riporta quante bozze sono state escluse
+(`bozze_escluse`) e il totale delle anomalie nelle minor release (`anomalie`).
+
+Per ogni versione:
+
+`modalita`, `versione_riferimento`
+
+:   Se la versione ha scaricato i file (`download`) o rimanda ai contenuti della
+    versione di riferimento della sua major (`solo_metadati`), e quale sia
+    questa versione di riferimento.
+
+`files_ok`
+
+:   File di questa versione presenti nel pacchetto a fine esecuzione:
+    scaricati nel run oppure già presenti e integri. In una minor è diverso da
+    zero solo in caso di anomalia o di recupero di un download fallito.
+
+`files_riferiti`
+
+:   File che rimandano a un contenuto conservato in un'altra versione.
+
+`files_err`
+
+:   File non ottenuti, per download fallito o verifica di integrità non
+    superata. Se è maggiore di zero la versione risulta `partial`.
+
+`anomalie`
+
+:   Elenco degli scostamenti dalla regola delle minor release, ciascuno con
+    `tipo`, `id` e `percorso` (sezione 6, "Quando la regola non vale").
 
 ### doi_vuoti.json
 
@@ -904,11 +1503,44 @@ per il server in uso (ogni installazione Archivematica ha UUID diversi).
 
 ### SSL Certificate Verify Failed
 
+Il rimedio dipende dal servizio che ha rifiutato il certificato (vedi
+"Note su SSL" nella sezione 2).
+
+Se l'errore riguarda **Archivematica**, di norma il certificato è self-signed:
+
 ```bash
 SSL_VERIFY=false   # nel .env
 # oppure
 python3 archivematica_ingest.py --no-verify-ssl
 ```
+
+Se l'errore riguarda **Dataverse** (`dataverse.unimi.it`), `SSL_VERIFY` non ha
+effetto. Il certificato di Dataverse è valido, quindi l'errore indica di solito
+qualcosa che si frappone nella connessione, per esempio un proxy che intercetta
+il traffico TLS. Conviene prima capire la causa; solo se la si accetta, si
+disattiva la verifica:
+
+```bash
+DATAVERSE_SSL_VERIFY=false   # nel .env
+# oppure
+python3 scarica_dataverse.py --no-verify-ssl
+```
+
+### [ANOMALIA] in una minor release
+
+Una minor release contiene un file assente dalla versione di riferimento della
+major, un file con contenuto cambiato, oppure ha perso un file presente nella
+versione precedente. La pipeline ha già reagito nel modo sicuro: i file nuovi o
+cambiati sono stati scaricati nella cartella della minor, e i file rimossi
+restano conservati nella versione da cui provengono. Non c'è quindi perdita di
+dati.
+
+L'anomalia va comunque esaminata, perché indica un dataset che non rispetta la
+regola su cui si basa il pacchetto. Il dettaglio è nel campo `anomalie` della
+versione in `riepilogo_download.json`: per ogni caso il `tipo`, il
+`dataFile.id` e il percorso. Confrontando su Dataverse le due versioni
+coinvolte si capisce di che modifica si tratta; il significato dei tipi è
+spiegato nella sezione 6, "Quando la regola non vale".
 
 ### EXPORT_DCAT=true nel .env ma dcat.json non viene generato
 
@@ -1182,7 +1814,8 @@ cp .env.template .env
 nano .env
 # Compilare almeno:
 #   OUTPUT_DIR, DATAVERSE_API_KEY, AM_API_KEY, SS_API_KEY,
-#   AM_TRANSFER_SOURCE_UUID, SSL_VERIFY
+#   AM_TRANSFER_SOURCE_UUID, SSL_VERIFY (Archivematica).
+#   DATAVERSE_SSL_VERIFY resta true (default).
 
 # Recupera UUID Transfer Source
 python3 archivematica_ingest.py --no-verify-ssl --list-sources
