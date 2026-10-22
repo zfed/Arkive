@@ -9,13 +9,19 @@
 #   file di testo letto dalla pipeline (dois.txt): un DOI per riga, nel formato
 #   persistentId "doi:10.13130/RD_UNIMI/XXXXXX", come in dois.txt.example.
 #
-#   Formato di input atteso: una lista di oggetti con almeno il campo "dsUrl",
-#   ad esempio
+#   Formato di input atteso: una lista di oggetti con un campo che contiene
+#   il DOI. Sono riconosciuti automaticamente (in quest'ordine) i formati
+#   forniti finora dai colleghi:
 #       [{"dsUrl": "https://doi.org/10.13130/RD_UNIMI/KCYYEB",
 #         "pubDate": "2020-09-09", "name": "..."}, ...]
-#   Sono accettati anche un oggetto con la lista sotto "data" o "items", e
-#   valori del campo nelle forme https://doi.org/..., http://dx.doi.org/...,
-#   doi:... oppure 10.xxxx/... nudo.
+#       [{"global_id": "10.13130/RD_UNIMI/KCYYEB",
+#         "datasetUrl": "https://doi.org/10.13130/RD_UNIMI/KCYYEB",
+#         "published_at": "...", "entity_id": 5011, "name": "...",
+#         "size": 112986}, ...]
+#   cioe' i campi dsUrl, datasetUrl, global_id, persistentId. Per un campo
+#   diverso si usa --campo. Sono accettati anche un oggetto con la lista sotto
+#   "data" o "items", e valori nelle forme https://doi.org/...,
+#   http://dx.doi.org/..., doi:... oppure 10.xxxx/... nudo.
 #
 #   Il programma:
 #     - normalizza ogni DOI nel formato "doi:10.xxxx/...";
@@ -60,6 +66,17 @@ PREFISSI = (
 
 # Un DOI inizia sempre con "10." seguito dal prefisso numerico del registrante
 RE_DOI = re.compile(r"^10\.\d{4,9}/\S+$")
+
+# Campi riconosciuti automaticamente, in ordine di preferenza
+CAMPI_NOTI = ("dsUrl", "datasetUrl", "global_id", "persistentId")
+
+
+def rileva_campo(record: list):
+    """Restituisce il primo campo noto presente nei record, oppure None."""
+    for campo in CAMPI_NOTI:
+        if any(isinstance(r, dict) and campo in r for r in record):
+            return campo
+    return None
 
 
 def normalizza(valore: str):
@@ -109,8 +126,9 @@ def main() -> int:
     ap.add_argument("json", help="file JSON fornito dai colleghi di Dataverse")
     ap.add_argument("-o", "--output", default="dois.txt",
                     help="file di output (default: dois.txt)")
-    ap.add_argument("--campo", default="dsUrl",
-                    help="campo che contiene il DOI (default: dsUrl)")
+    ap.add_argument("--campo", default=None,
+                    help="campo che contiene il DOI (default: rilevato "
+                         "automaticamente tra " + ", ".join(CAMPI_NOTI) + ")")
     ap.add_argument("--escludi", action="append", default=[], metavar="LISTA",
                     help="lista di DOI da escludere; ripetibile")
     ap.add_argument("--force", action="store_true",
@@ -135,6 +153,14 @@ def main() -> int:
     except (ValueError, json.JSONDecodeError) as e:
         print(f"ERRORE: JSON non valido: {e}", file=sys.stderr)
         return 1
+
+    if args.campo is None:
+        args.campo = rileva_campo(record)
+        if args.campo is None:
+            print("ERRORE: nessun campo DOI riconosciuto nei record (cercati: "
+                  + ", ".join(CAMPI_NOTI) + "). Indicalo con --campo.",
+                  file=sys.stderr)
+            return 1
 
     esclusi = carica_esclusioni(args.escludi)
 
@@ -163,6 +189,7 @@ def main() -> int:
         for d in dois:
             fh.write(d + "\n")
 
+    print(f"Campo DOI usato     : {args.campo}")
     print(f"Record nel JSON     : {len(record)}")
     print(f"Duplicati ignorati  : {n_dup}")
     print(f"Esclusi da liste    : {n_escl}")
